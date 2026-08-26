@@ -21,7 +21,7 @@
 static int load_cfg(SolarCfg *c) {
     FILE *f = fopen(CFG_FILE, "r");
     if (!f) return -1;
-    int n = fscanf(f, "%lf %lf %hhd", &c->lat, &c->lon, &c->tz);
+    int n = fscanf(f, "%lf %lf %lf", &c->lat, &c->lon, &c->tz);
     fclose(f);
     return n == 3 ? 0 : -1;
 }
@@ -29,7 +29,7 @@ static int load_cfg(SolarCfg *c) {
 static int save_cfg(const SolarCfg *c) {
     FILE *f = fopen(CFG_FILE, "w");
     if (!f) return -1;
-    fprintf(f, "%.6f %.6f %d\n", c->lat, c->lon, (int)c->tz);
+    fprintf(f, "%.6f %.6f %.2f\n", c->lat, c->lon, c->tz);
     fclose(f);
     return 0;
 }
@@ -64,12 +64,12 @@ static void show(const SolarCfg *c, time_t t) {
                                                : "极夜, 今日无日出")
                      : hm((int)r.to_set_min));
 
-    printf("SolarTime - 本地: %s (UTC%+d)\n"
+    printf("SolarTime - 本地: %s (UTC%+g)\n"
            "GPS: %.4f°N, %.4f°E\n"
            "太阳时: %02d:%02d  |  赤纬: %.2f°  均时差: %+.1fmin\n"
            "日出: %s   正午: %s   日落: %s\n"
            "距日落: %s\n",
-           now, c->tz, c->lat, c->lon,
+           now, (double)c->tz, c->lat, c->lon,
            sm / 60, sm % 60, r.decl, r.eot, sr, sn, ss, st);
 }
 
@@ -80,7 +80,7 @@ int main(int argc, char **argv) {
         /* 一次性获取GPS并保存, 之后离线运行 */
         c.lat = atof(argv[2]);
         c.lon = atof(argv[3]);
-        c.tz  = (int8_t)atoi(argv[4]);
+        c.tz  = atof(argv[4]);
         if (save_cfg(&c)) { perror("save"); return 1; }
         printf("GPS已保存 -> %s\n", CFG_FILE);
         return 0;

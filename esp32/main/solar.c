@@ -73,11 +73,14 @@ void solar_compute(const SolarCfg *cfg, time_t utc, SolarResult *r) {
     double sm = cur + cfg->lon * 4.0 + eot - tz;
     r->solar_min = sm;
 
-    /* 距日落(分钟), 取最近一次日落, 可跨午夜; 极昼取 +1440 哨兵 */
-    double ds = polar ? 1440.0 : ws - cur;
-    if (!polar) {
-        if (ds < -720.0) ds += 1440.0;
-        if (ds > 720.0)  ds -= 1440.0;
+    /* 距日落(分钟): 下一次日落距今时间; 已过今日日落则指向明日
+     * 极昼无日落取 +1440 哨兵, 极夜无日出取 -1440 哨兵 */
+    double ds;
+    if (polar) {
+        ds = (ha == -999.0) ? 1440.0 : -1440.0;
+    } else {
+        ds = ws - cur;
+        if (ds <= 0) ds += 1440.0;
     }
     r->to_set_min = ds;
 }

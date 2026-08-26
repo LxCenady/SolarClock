@@ -6,22 +6,54 @@
 #include "freertos/task.h"
 #include "solar.h"
 
-/* 默认GPS/时区取自 menuconfig; 之后可通过串口 GPS lat lon tz 热更新 */
+/* ================= 串口协议 (纯ASCII JSON) =================
+ * 请求(一行): {"cmd":"solar","ts":1734782400,"lat":69.6492,"lon":18.9553,"tz":1}
+ * 响应(一行): {"rise":"05:24","noon":"11:56","set":"18:28","solar":"13:55",
+ *              "decl":11.42,"eot":-2.7,"to_set":269,"polar":null}
+ * polar: null|"day"|"night"; 极区时 rise/set 为 "--"; to_set 哨兵 ±1440
+ * 与GPS芯片/RTC/LCD/UI链路兼容: 全ASCII, 无中文
+ * ========================================================== */
 static SolarCfg g_cfg = {CONFIG_SOLAR_LAT, CONFIG_SOLAR_LON, CONFIG_SOLAR_TZ};
 
 static const char *TAG = "solartime";
 
-static void show_day(time_t now, const SolarResult *r) {
-    ESP_LOGI(TAG, "日出 %02d:%02d 正午 %02d:%02d 日落 %02d:%02d (赤纬%.2f° 均时差%+.1fmin)",
-             r->rise_min / 60, r->rise_min % 60,
-             r->noon_min / 60, r->noon_min % 60,
-             r->set_min / 60, r->set_min % 60,
-             r->decl, r->eot);
+static const char *hm(int min) {
+    static char b[3][8];
+    static int i;
+    i = (i + 1) % 3;
+    if (min < 0) min += 1440;
+    min %= 1440;
+    snprintf(b[i], sizeof b[i], "%02d:%02d", min / 60, min % 60);
+    return b[i];
 }
 
-/* 串口注入: GPS 31.2304 121.4737 8 (stdin为raw模式, 逐字符组行) */
-static void gps_task(void *arg) {
-    char line[64];
+/* 从JSON行提取 key 后的数值, 键序无关 */
+static int json_num(const char *line, const char *key, double *out) {
+    const char *p = strstr(line, key);
+    if (!p) return 0;
+    p = strchr(p + strlen(key), ':');
+    if (!p) return 0;
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+    return sscanf(p, "%lf", out) == 1;
+}
+
+static void send_json(const SolarResult *r) {
+    int polar = r->rise_min < 0;
+    int sm = ((int)r->solar_min % 1440 + 1440) % 1440;
+    printf("{\"rise\":\"%s\",\"noon\":\"%s\",\"set\":\"%s\",\"solar\":\"%02d:%02d\","
+           "\"decl\":%.2f,\"eot\":%.1f,\"to_set\":%d,\"polar\":%s}\n",
+           polar ? "--" : hm(r->rise_min),
+           hm(r->noon_min),
+           polar ? "--" : hm(r->set_min),
+           sm / 60, sm % 60,
+           r->decl, r->eot, (int)r->to_set_min,
+           polar ? (r->to_set_min > 0 ? "\"day\"" : "\"night\"") : "null");
+}
+
+/* 串口注入 (stdin为raw模式, 逐字符组行) */
+static void cmd_task(void *arg) {
+    char line[128];
     int n = 0;
     for (;;) {
         int c = getchar();
@@ -33,15 +65,14 @@ static void gps_task(void *arg) {
             if (!n) continue;
             line[n] = 0;
             n = 0;
-            double la, lo;
-            int tz;
-            if (sscanf(line, "GPS %lf %lf %d", &la, &lo, &tz) == 3) {
-                g_cfg = (SolarCfg){la, lo, (int8_t)tz};
+            double ts, la, lo, tz;
+            if (strstr(line, "\"cmd\"") && json_num(line, "\"lat\"", &la)
+                && json_num(line, "\"lon\"", &lo) && json_num(line, "\"tz\"", &tz)) {
+                if (!json_num(line, "\"ts\"", &ts)) ts = 0;
+                g_cfg = (SolarCfg){la, lo, tz};
                 SolarResult r;
-                solar_compute(&g_cfg, time(NULL), &r);
-                ESP_LOGI(TAG, "GPS已注入: %.4f°N %.4f°E UTC%+d",
-                         g_cfg.lat, g_cfg.lon, (int)g_cfg.tz);
-                show_day(time(NULL), &r);
+                solar_compute(&g_cfg, (time_t)ts, &r);
+                send_json(&r);
             }
         } else if (n < (int)sizeof(line) - 1) {
             line[n++] = (char)c;
@@ -51,27 +82,14 @@ static void gps_task(void *arg) {
 }
 
 void app_main(void) {
-    ESP_LOGI(TAG, "SolarTime 启动 GPS: %.4f°N %.4f°E UTC%+d (串口输入 GPS lat lon tz 可更新)",
-             g_cfg.lat, g_cfg.lon, (int)g_cfg.tz);
+    ESP_LOGI(TAG, "SolarTime ready, GPS: %.4f %.4f UTC%+g", g_cfg.lat, g_cfg.lon, g_cfg.tz);
+    ESP_LOGI(TAG, "proto: {\"cmd\":\"solar\",\"ts\":<utc>,\"lat\":..,\"lon\":..,\"tz\":..}");
 
-    xTaskCreate(gps_task, "gps", 4096, NULL, 5, NULL);
+    xTaskCreate(cmd_task, "cmd", 4096, NULL, 5, NULL);
 
-    int last_day = -1;
     for (;;) {
-        /* 无RTC/NTP时 time() 为自启动秒数, 供算法演示;
-         * 接入RTC或NTP后自动按真实日期运行 */
-        time_t now = time(NULL);
         SolarResult r;
-        solar_compute(&g_cfg, now, &r);
-
-        int day = (int)(now / 86400);
-        if (day != last_day) {
-            show_day(now, &r);
-            last_day = day;
-        }
-        int sm = ((int)r.solar_min % 1440 + 1440) % 1440;
-        ESP_LOGI(TAG, "太阳时 %02d:%02d | 距日落 %+d 分",
-                 sm / 60, sm % 60, (int)r.to_set_min);
+        solar_compute(&g_cfg, time(NULL), &r);
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }

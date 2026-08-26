@@ -8,7 +8,7 @@
 typedef struct {
     double lat;     /* 纬度, 北正南负, 度 */
     double lon;     /* 经度, 东正西负, 度 */
-    int8_t  tz;     /* 时区, UTC+8 => 8 */
+    double tz;      /* 时区, UTC+8 => 8, 支持小数(如孟买5.5) */
 } SolarCfg;
 
 /* 计算结果 */
