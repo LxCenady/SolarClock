@@ -1,0 +1,11 @@
+menu "SolarTime 配置"
+    config SOLAR_LAT
+        float "纬度 (北正南负)"
+        default 31.2304
+    config SOLAR_LON
+        float "经度 (东正西负)"
+        default 121.4737
+    config SOLAR_TZ
+        int "时区 (UTC+8 => 8)"
+        default 8
+endmenu

@@ -1,2 +1,4 @@
 solartime
 solar.cfg
+esp32/build/
+esp32/sdkconfig

@@ -1,0 +1,2 @@
+CONFIG_IDF_TARGET="esp32s3"
+# 本板无原生USB口, 控制台走 UART0 -> CH340 (ttyACM0)
