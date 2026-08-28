@@ -103,6 +103,9 @@ def main():
     ser = serial.Serial(args.port, 115200, timeout=0.5)
     time.sleep(2.0)  # 等待启动
     ser.reset_input_buffer()
+    ser.write(b'{"cmd":"stop"}\n')  # 清场: 退出残留心跳模式
+    time.sleep(0.3)
+    ser.reset_input_buffer()
 
     ok = 0
     for i, case in enumerate(cases, 1):

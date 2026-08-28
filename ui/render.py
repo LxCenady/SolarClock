@@ -29,6 +29,8 @@ def render(hb):
     polar = p != 0
     dp = hb.get("dp", 0)
     ev = hb.get("ev", 0)
+    ne = hb.get("ne", 0)
+    tne = hb.get("tne", 0)
 
     rise = set_ = ""
     if polar:
@@ -38,8 +40,14 @@ def render(hb):
         rise = hb.get("r", "--")
         set_ = hb.get("st", "--")
 
-    ts = hb.get("ts", 0)
-    sunset = "n/a (polar)" if polar else f"{ts} min"
+    if ne == 0:
+        nxt = f"sunset in  {tne} min"
+    elif ne == 1:
+        nxt = f"sunrise in {tne} min"
+    elif ne == 2:
+        nxt = "n/a (polar day)"
+    else:
+        nxt = "n/a (polar night)"
 
     if ev == 1:
         event = _EV_SUNRISE
@@ -56,12 +64,12 @@ def render(hb):
 
     lines = [
         f" SolarClock  {d}  {w}",
-        f" solar time  {s}",
-        f" location    {loc}",
-        f" sunrise     {rise}",
-        f" sunset      {set_}",
-        f" daylight    {_bar(dp)} {dp:3d}%",
-        f" sunset in   {sunset}",
-        f" event       {event}",
+        f" Solar time  {s}",
+        f" Location    {loc}",
+        f" Sunrise     {rise}",
+        f" Sunset      {set_}",
+        f" Daylight    {_bar(dp)} {dp:3d}%",
+        f" Next event  {nxt}",
+        f" Event       {event}",
     ]
     return "\x1b[H" + "\n".join(lines) + "\n\x1b[?25l"

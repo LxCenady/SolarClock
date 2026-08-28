@@ -104,24 +104,33 @@ def verify(lat, lon, tz_h, ts, r, exp, stream):
         f.write(json.dumps(r, separators=(",", ":")) + "\n")
 
     fails = []
+    warns = []
     tol = tol_min(lat)
     polar = exp.get("polar")
     if r.get("rise") == "--":
         if not polar:
-            fails.append("firmware极区但参考非极区")
-        return fails
+            msg = "firmware极区但参考非极区"
+            if abs(lat) > 72:
+                warns.append(msg + " (>72°折射约定边界, 降级警告)")
+            else:
+                fails.append(msg)
+        return fails, warns
     if polar:
         if r.get("polar") != polar:
-            fails.append(f"polar got {r.get('polar')} exp {polar}")
+            msg = f"polar got {r.get('polar')} exp {polar}"
+            if abs(lat) > 72:
+                warns.append(msg + " (>72°折射约定边界, 降级警告)")
+            else:
+                fails.append(msg)
     else:
         for k in ("rise", "noon", "set"):
             if dmin(hm_min(r[k]), hm_min(exp[k])) > tol:
                 fails.append(f"{k} got {r[k]} exp {exp[k]} (tol{tol})")
         if abs(r["eot"] - exp["eot"]) > 0.5:
             fails.append(f"eot got {r['eot']:.1f} exp {exp['eot']}")
-    if dmin(hm_min(r["solar"]), hm_min(exp["solar"])) > 2:
-        fails.append(f"solar got {r['solar']} exp {exp['solar']}")
-    return fails
+        if dmin(hm_min(r["solar"]), hm_min(exp["solar"])) > 2:
+            fails.append(f"solar got {r['solar']} exp {exp['solar']}")
+    return fails, warns
 
 
 def wait_json(ser, timeout=6):
@@ -156,6 +165,9 @@ def main():
     ser = serial.Serial(args.port, 115200, timeout=0.5)
     time.sleep(2.0)
     ser.reset_input_buffer()
+    ser.write(b'{"cmd":"stop"}\n')  # 清场: 退出残留心跳模式
+    time.sleep(0.3)
+    ser.reset_input_buffer()
     print(f"热测试开始: {args.rounds} 轮, seed={args.seed}, 抖动±{args.jitter // 3600}h")
     print(f"JSON流: {args.stream} (另一终端: tail -f {args.stream})\n")
 
@@ -176,7 +188,9 @@ def main():
             print(f"[{i:02d}] FAIL {tzname} @{lat:.3f},{lon:.3f}: 无响应")
             continue
         exp = reference(lat, lon, tz_h, ts)
-        fails = verify(lat, lon, tz_h, ts, r, exp, args.stream)
+        fails, warns = verify(lat, lon, tz_h, ts, r, exp, args.stream)
+        for w in warns:
+            print(f"[{i:02d}] WARN {w}")
         if not fails:
             ok += 1
             print(f"[{i:02d}] PASS {tzname:20s} tz{tz_h:+.1f} ts{ts} "

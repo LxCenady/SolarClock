@@ -4,3 +4,6 @@ esp32/build/
 esp32/sdkconfig
 __pycache__/
 *.pyc
+
+# Agent档案只读, 永不推送
+FOR_AGENTS_READ_ONLY_DONNOT_PUSH.md

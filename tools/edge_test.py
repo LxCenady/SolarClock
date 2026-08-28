@@ -47,6 +47,9 @@ def main():
     ser = serial.Serial(args.port, 115200, timeout=0.5)
     time.sleep(2.0)
     ser.reset_input_buffer()
+    ser.write(b'{"cmd":"stop"}\n')  # 清场: 退出残留心跳模式
+    time.sleep(0.3)
+    ser.reset_input_buffer()
     print(f"边界测试: {len(CASES)} 例\n")
 
     ok = 0
@@ -58,7 +61,9 @@ def main():
             print(f"[{name}] FAIL 无响应 ({note})")
             continue
         exp = reference(lat, lon, tz, ts)
-        fails = verify(lat, lon, tz, ts, r, exp, "/tmp/solarstream.jsonl")
+        fails, warns = verify(lat, lon, tz, ts, r, exp, "/tmp/solarstream.jsonl")
+        for w in warns:
+            print(f"[{name}] WARN {w}")
         if not fails:
             ok += 1
             print(f"[{name}] PASS polar={r['polar']} rise={r['rise']} noon={r['noon']} "

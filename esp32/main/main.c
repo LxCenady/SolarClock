@@ -16,13 +16,16 @@
  *   一次性: {"rise":"05:24","noon":"11:56","set":"18:28","solar":"13:55",
  *            "decl":11.42,"eot":-2.7,"to_set":269,"polar":null}
  *   心跳(100ms): {"t":"13:52:05","d":"08-26","s":"13:55","r":"05:24","st":"18:28",
- *                 "ts":269,"dp":62,"ev":0,"p":0}
+ *                 "ne":0,"tne":269,"dp":62,"ev":0,"p":0,"la":31.23,"lo":121.47}
+ *             ne: 0白天(距日落)/1夜晚(距日出)/2极昼/3极夜
+ *             tne: 距下一事件分钟(0-1439)
  *             dp: 日光进度%  ev: 0无/1日出事件/2日落事件(±30s窗口)  p: 0正常/1极昼/-1极夜
  * 全ASCII无中文, 与GPS芯片/RTC/LCD/UI链路兼容
  * ========================================================== */
 static SolarCfg g_cfg = {CONFIG_SOLAR_LAT, CONFIG_SOLAR_LON, CONFIG_SOLAR_TZ};
 static time_t g_t0 = 0;      /* 时间基准: 开机时对应的UTC秒 */
 static volatile int g_hb = 0; /* 心跳模式标志 */
+static SemaphoreHandle_t s_out; /* 输出互斥: 防应答与心跳printf行内交错 */
 
 static const char *TAG = "solartime";
 
@@ -55,6 +58,7 @@ static int json_num(const char *line, const char *key, double *out) {
 static void send_json(const SolarResult *r) {
     int polar = r->rise_min < 0;
     int sm = ((int)r->solar_min % 1440 + 1440) % 1440;
+    xSemaphoreTake(s_out, portMAX_DELAY);
     printf("{\"rise\":\"%s\",\"noon\":\"%s\",\"set\":\"%s\",\"solar\":\"%02d:%02d\","
            "\"decl\":%.2f,\"eot\":%.1f,\"to_set\":%d,\"polar\":%s}\n",
            polar ? "--" : hm(r->rise_min),
@@ -63,6 +67,7 @@ static void send_json(const SolarResult *r) {
            sm / 60, sm % 60,
            r->decl, r->eot, (int)r->to_set_min,
            polar ? (r->to_set_min > 0 ? "\"day\"" : "\"night\"") : "null");
+    xSemaphoreGive(s_out);
 }
 
 /* 心跳包: 时钟+日出日落+太阳时+距日落+日光进度+事件 */
@@ -99,16 +104,37 @@ static void send_hb(time_t now, const SolarCfg *cfg, const SolarResult *r) {
         else if (labs(d2) <= 30) ev = 2;
     }
 
+    /* 昼夜判定 + 下一事件: ne 0白天(距日落)/1夜晚(距日出)/2极昼/3极夜 */
+    int ne, tne;
+    if (polar == 1) {
+        ne = 2; tne = 0;
+    } else if (polar == -1) {
+        ne = 3; tne = 0;
+    } else {
+        int cur_min = cur_s / 60;
+        int wr = r->rise_min, ws = r->set_min;
+        long dr = (long)(wr - cur_min);
+        long ds = (long)(ws - cur_min);
+        if (dr <= 0) dr += 1440;
+        if (ds <= 0) ds += 1440;
+        int day = (ws > wr) ? (cur_min >= wr && cur_min < ws)
+                            : (cur_min >= wr || cur_min < ws); /* 日落跨午夜 */
+        if (day) { ne = 0; tne = (int)ds; }
+        else     { ne = 1; tne = (int)dr; }
+    }
+
+    xSemaphoreTake(s_out, portMAX_DELAY);
     printf("{\"t\":\"%02d:%02d:%02d\",\"d\":\"%02d-%02d\",\"s\":\"%02d:%02d\","
-           "\"r\":\"%s\",\"st\":\"%s\",\"ts\":%d,\"dp\":%d,\"ev\":%d,\"p\":%d,"
-           "\"la\":%.4f,\"lo\":%.4f}\n",
+           "\"r\":\"%s\",\"st\":\"%s\",\"ne\":%d,\"tne\":%d,\"dp\":%d,\"ev\":%d,"
+           "\"p\":%d,\"la\":%.4f,\"lo\":%.4f}\n",
            tm->tm_hour, tm->tm_min, tm->tm_sec,
            tm->tm_mon + 1, tm->tm_mday,
            sm / 60, sm % 60,
            polar ? "--" : hm(r->rise_min),
            polar ? "--" : hm(r->set_min),
-           (int)r->to_set_min, dp, ev, polar,
+           ne, tne, dp, ev, polar,
            cfg->lat, cfg->lon);
+    xSemaphoreGive(s_out);
 }
 
 /* 串口命令: 原始UART驱动轮询(5ms超时让出CPU, 避免stdio缓冲/锁与心跳printf互斥) */
@@ -152,6 +178,7 @@ void app_main(void) {
     /* v6控制台默认裸寄存器轮询, 无uart驱动; 显式安装以支持阻塞读取,
      * 输出侧printf仍走原控制台路径不受影响 */
     uart_driver_install(UART_NUM_0, 512, 0, 0, NULL, 0);
+    s_out = xSemaphoreCreateMutex();
 
     ESP_LOGI(TAG, "SolarTime ready, GPS: %.4f %.4f UTC%+g", g_cfg.lat, g_cfg.lon, g_cfg.tz);
 
