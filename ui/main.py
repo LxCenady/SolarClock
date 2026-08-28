@@ -2,7 +2,8 @@
 """solarclock: SolarTime TUI 入口
 
 用法:
-  solarclock               连接ESP32, 用本地缓存坐标(无则ESP32默认)
+  solarclock               连接ESP32, 用本地缓存配置(无则ESP32默认)
+  solarclock -c            交互配置: 坐标/时区/当地时间, 记忆供下次使用
   solarclock -r            随机生成陆地经纬度+时区并注入
   solarclock -L 31.2 -O 121.5 -T 8 [--ts 1734782400]   指定坐标/时间戳(测试用)
 
@@ -10,6 +11,7 @@
 状态机: DISCONNECTED -> INIT -> LIVE -> QUIT
 """
 import argparse
+import datetime
 import json
 import os
 import random
@@ -40,10 +42,36 @@ def _rand_point():
         lon = random.uniform(-180, 180)
         tzname = tf.timezone_at(lat=lat, lng=lon)
         if tzname:
-            import datetime
             dt = datetime.datetime.now(datetime.timezone.utc)
             off = dt.astimezone(ZoneInfo(tzname)).utcoffset()
             return round(lat, 6), round(lon, 6), off.total_seconds() / 3600.0
+
+
+def _config_mode():
+    """-c: 交互询问坐标/时区/当地时间, 计算时间偏移并记忆"""
+    print("=== SolarClock 配置模式 ===")
+    try:
+        lat = float(input("纬度 lat (北正南负, 如 31.2304): "))
+        lon = float(input("经度 lon (东正西负, 如 121.4737): "))
+        tz = float(input("时区 tz (UTC+8 => 8, 支持小数): "))
+        s = input("当地时间 HH:MM (该地墙钟当前时间): ").strip()
+        h, m = map(int, s.split(":"))
+    except (ValueError, EOFError) as e:
+        print(f"[error] 输入无效: {e}")
+        return False
+
+    # 期望的UTC时刻 = 当地墙钟 - 时区; delta = 期望 - PC当前UTC
+    wall_min = h * 60 + m
+    utc_now = datetime.datetime.now(datetime.timezone.utc)
+    utc_now_min = utc_now.hour * 60 + utc_now.minute
+    want_min = wall_min - tz * 60
+    delta_h = (want_min - utc_now_min) / 60.0
+    delta_h = (delta_h + 12) % 24 - 12  # 对齐到±12h内
+
+    _save_cache(lat, lon, tz, delta_h)
+    print(f"[ok] 已记忆: lat={lat} lon={lon} tz={tz} 时间偏移={delta_h:+.1f}h")
+    print(f"[ok] 下次运行 solarclock 将显示 {s} 附近的当地时间")
+    return True
 
 
 def _load_cache():
@@ -53,9 +81,10 @@ def _load_cache():
         return None
 
 
-def _save_cache(lat, lon, tz):
+def _save_cache(lat, lon, tz, delta_h=0.0):
     try:
-        json.dump({"lat": lat, "lon": lon, "tz": tz}, open(CACHE, "w"))
+        json.dump({"lat": lat, "lon": lon, "tz": tz, "delta_h": delta_h},
+                  open(CACHE, "w"))
     except Exception:
         pass
 
@@ -69,12 +98,17 @@ def main():
     ap = argparse.ArgumentParser(description="SolarTime TUI")
     ap.add_argument("--port", default=PORT)
     ap.add_argument("-r", action="store_true", help="随机生成经纬度+时区")
+    ap.add_argument("-c", action="store_true", help="交互配置坐标/时区/当地时间并记忆")
     ap.add_argument("-L", "--lat", type=float)
     ap.add_argument("-O", "--lon", type=float)
     ap.add_argument("-T", "--tz", type=float)
     ap.add_argument("--ts", type=int, default=None, help="注入的UTC时间戳(默认当前)")
     args = ap.parse_args()
 
+    if args.c:
+        return 0 if _config_mode() else 1
+
+    delta_h = 0.0
     # ---- 坐标来源: -r > -L/-O/-T > 本地缓存 > ESP32默认 ----
     if args.r:
         lat, lon, tz = _rand_point()
@@ -85,7 +119,8 @@ def main():
         cache = _load_cache()
         if cache:
             lat, lon, tz = cache["lat"], cache["lon"], cache["tz"]
-            print(f"[cache] lat={lat} lon={lon} tz={tz}")
+            delta_h = cache.get("delta_h", 0.0)
+            print(f"[cache] lat={lat} lon={lon} tz={tz} 时间偏移{delta_h:+.1f}h")
         else:
             lat, lon, tz = None, None, None
             print("[default] 使用ESP32内置坐标")
@@ -105,7 +140,8 @@ def main():
                 state = ST_INIT
 
             elif state == ST_INIT:
-                ts = args.ts if args.ts is not None else int(time.time())
+                ts = args.ts if args.ts is not None \
+                    else int(time.time()) + int(delta_h * 3600)
                 if lat is None:
                     cfg = link.get_cfg()
                     if cfg is None:
@@ -121,7 +157,7 @@ def main():
                     break
                 print(f"[init] OK rise={ack['rise']} set={ack['set']} "
                       f"solar={ack['solar']} decl={ack['decl']} eot={ack['eot']}")
-                _save_cache(lat, lon, tz)
+                _save_cache(lat, lon, tz, delta_h)
                 sys.stdout.write(clear_screen() + "\x1b[?25l")
                 sys.stdout.flush()
                 state = ST_LIVE
@@ -156,9 +192,11 @@ def main():
 
 
 if __name__ == "__main__":
-    # 原始模式按键(无需回车)
     fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
+    try:
+        old = termios.tcgetattr(fd)
+    except termios.error:
+        sys.exit(main())  # 非tty(管道/重定向输入), 直接运行
     try:
         tty.setcbreak(fd)
         sys.exit(main())
