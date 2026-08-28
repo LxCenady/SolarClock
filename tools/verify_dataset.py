@@ -29,6 +29,7 @@ def dmin(a, b):
 
 
 def wait_json(ser, timeout=6):
+    """等待一条一次性应答(特征: noon字段), 跳过心跳包"""
     t0 = time.time()
     while time.time() - t0 < timeout:
         b = ser.readline()
@@ -37,9 +38,11 @@ def wait_json(ser, timeout=6):
         line = b.decode(errors="replace").strip()
         if line.startswith("{"):
             try:
-                return json.loads(line)
+                d = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if "noon" in d:
+                return d
     return None
 
 
