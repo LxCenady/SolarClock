@@ -91,7 +91,12 @@ def sample(name, name_en, lat, lon, tz, ts):
     dial = (720 + ts_min - noon_utc_min) % 1440
     exp["solar"] = f"{int(dial // 60):02d}:{int(dial % 60):02d}"
     # 均时差(分钟): 由参考正午反推, 与固件独立计算交叉验证
-    exp["eot"] = round(720 - lon * 4 - noon_utc_min, 2)
+    eot = round(720 - lon * 4 - noon_utc_min, 2)
+    if eot > 30:  # 太阳正午跨UTC午夜(日期变更线)时回绕
+        eot -= 1440
+    elif eot < -30:
+        eot += 1440
+    exp["eot"] = eot
 
     return {
         "name": name, "name_en": name_en, "lat": lat, "lon": lon, "tz": tz,
