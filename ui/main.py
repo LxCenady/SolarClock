@@ -34,6 +34,29 @@ PORT = "/dev/ttyACM0"
 ST_DISC, ST_INIT, ST_LIVE, ST_QUIT = 0, 1, 2, 3
 
 
+def _ip_geolocate():
+    """PC本地网络定位(IP), 返回 (lat, lon, tz偏移小时)"""
+    import urllib.request
+    for url in ("https://ipinfo.io/json", "http://ip-api.com/json/?fields=lat,lon,timezone"):
+        try:
+            with urllib.request.urlopen(url, timeout=8) as f:
+                d = json.load(f)
+            if "loc" in d:
+                lat, lon = map(float, d["loc"].split(","))
+                tzname = d.get("timezone", "UTC")
+            elif "lat" in d:
+                lat, lon = float(d["lat"]), float(d["lon"])
+                tzname = d.get("timezone", "UTC")
+            else:
+                continue
+            dt = datetime.datetime.now(datetime.timezone.utc)
+            off = dt.astimezone(ZoneInfo(tzname)).utcoffset()
+            return round(lat, 6), round(lon, 6), off.total_seconds() / 3600.0
+        except Exception:
+            continue
+    return None
+
+
 def _rand_point():
     """随机陆地经纬度, 按该点反查时区偏移(含夏令时)"""
     tf = TimezoneFinder()
@@ -98,6 +121,8 @@ def main():
     ap = argparse.ArgumentParser(description="SolarTime TUI")
     ap.add_argument("--port", default=PORT)
     ap.add_argument("-r", action="store_true", help="随机生成经纬度+时区")
+    ap.add_argument("--local", action="store_true",
+                    help="PC本地网络定位(IP)获取GPS, 打包JSON提交ESP32")
     ap.add_argument("-c", action="store_true", help="交互配置坐标/时区/当地时间并记忆")
     ap.add_argument("-L", "--lat", type=float)
     ap.add_argument("-O", "--lon", type=float)
@@ -109,10 +134,17 @@ def main():
         return 0 if _config_mode() else 1
 
     delta_h = 0.0
-    # ---- 坐标来源: -r > -L/-O/-T > 本地缓存 > ESP32默认 ----
+    # ---- 坐标来源: -r > --local > -L/-O/-T > 本地缓存 > ESP32默认 ----
     if args.r:
         lat, lon, tz = _rand_point()
         print(f"[random] lat={lat} lon={lon} tz={tz}")
+    elif args.local:
+        g = _ip_geolocate()
+        if g is None:
+            print("[error] 本地网络定位失败(需联网), 请用 -c/-r/-L 指定坐标")
+            return 1
+        lat, lon, tz = g
+        print(f"[local] IP定位 lat={lat} lon={lon} tz={tz}")
     elif args.lat is not None and args.lon is not None and args.tz is not None:
         lat, lon, tz = args.lat, args.lon, args.tz
     else:
