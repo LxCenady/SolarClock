@@ -59,6 +59,8 @@ int gnss_parse_rmc(const char *line, GnssFix *f) {
     if (n < 11) return -3;
     if (fld[2][0] != 'A') return -4;      /* status: A=有效 */
     if (strlen(fld[1]) < 6 || strlen(fld[9]) < 6) return -5;
+    if (fld[3][0] < '0' || fld[3][0] > '9'
+        || fld[5][0] < '0' || fld[5][0] > '9') return -6; /* 经纬度空/非数字 */
 
     double t = atof(fld[1]);
     int hh = (int)(t / 10000.0), mm = (int)(t / 100.0) % 100, ss = (int)t % 100;

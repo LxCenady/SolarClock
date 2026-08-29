@@ -17,7 +17,7 @@ typedef struct {
     double noon_min;    /* 太阳正午(同上) */
     double set_min;     /* 日落(同上) */
     double solar_min;   /* 当地太阳时(墙钟分钟, 0-1440, 可能>1439) */
-    double to_set_min;  /* 距日落分钟数(已过则为负) */
+    double to_set_min;  /* 距下一次日落分钟数(0-1440]; 极昼+1440哨兵, 极夜-1440哨兵 */
     double decl;        /* 太阳赤纬, 度 */
     double eot;         /* 均时差, 分钟 */
 } SolarResult;

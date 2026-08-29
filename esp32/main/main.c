@@ -16,6 +16,9 @@
 #ifndef CONFIG_SOLAR_GNSS_UART_TX
 #define CONFIG_SOLAR_GNSS_UART_TX 18
 #endif
+#ifndef CONFIG_SOLAR_GNSS_TZ
+#define CONFIG_SOLAR_GNSS_TZ 8
+#endif
 
 /* ================= 串口协议 (纯ASCII JSON) =================
  * 请求(一行):
@@ -104,7 +107,8 @@ static void send_hb(time_t now, const SolarCfg *cfg, const SolarResult *r) {
     struct tm *tm = gmtime(&lt);
     int cur_s = (lt % 86400 + 86400) % 86400;
 
-    /* 日光进度(亚分钟精度): 极昼100 极夜0, 其余按日出日落区间钳制 */
+    /* 日光进度(亚分钟精度): 极昼100 极夜0, 其余按日出日落区间钳制
+     * 日落跨午夜(ws<wr)时凌晨段要回绕, 否则dp恒为0 */
     int dp;
     if (polar == 1) {
         dp = 100;
@@ -113,19 +117,22 @@ static void send_hb(time_t now, const SolarCfg *cfg, const SolarResult *r) {
     } else {
         double len = r->set_min - r->rise_min;
         if (len <= 0) len += 1440.0;
-        double p = (cur_s / 60.0 - r->rise_min) * 100.0 / len;
+        double p = fmod(cur_s / 60.0 - r->rise_min + 1440.0, 1440.0) * 100.0 / len;
         dp = (int)(p + 0.5);
         if (dp < 0) dp = 0;
         else if (dp > 100) dp = 100;
     }
 
-    /* 日出/日落事件: ±30s 窗口, 亚分钟精度 */
+    /* 日出/日落事件: ±30s 窗口, 亚分钟精度
+     * 回绕用 if/else(±12h内), fmod在负侧不回绕会漏判 */
     int ev = 0;
     if (!polar) {
         double d1 = cur_s - r->rise_min * 60.0;
         double d2 = cur_s - r->set_min * 60.0;
-        d1 = fmod(d1 + 43200.0, 86400.0) - 43200.0;
-        d2 = fmod(d2 + 43200.0, 86400.0) - 43200.0;
+        if (d1 > 43200.0) d1 -= 86400.0;
+        else if (d1 < -43200.0) d1 += 86400.0;
+        if (d2 > 43200.0) d2 -= 86400.0;
+        else if (d2 < -43200.0) d2 += 86400.0;
         if (fabs(d1) <= 30.0) ev = 1;
         else if (fabs(d2) <= 30.0) ev = 2;
     }
@@ -148,6 +155,7 @@ static void send_hb(time_t now, const SolarCfg *cfg, const SolarResult *r) {
                             : (cur_min >= wr || cur_min < ws); /* 日落跨午夜 */
         if (day) { ne = 0; tne = (int)(ds + 0.5); }
         else     { ne = 1; tne = (int)(dr + 0.5); }
+        if (tne > 1439) tne = 1439; /* 契约0-1439, 防四舍五入越界 */
     }
 
     xSemaphoreTake(s_out, portMAX_DELAY);
@@ -164,6 +172,8 @@ static void send_hb(time_t now, const SolarCfg *cfg, const SolarResult *r) {
     xSemaphoreGive(s_out);
 }
 
+static void handle_fix(const GnssFix *fix);
+
 /* 串口命令: 原始UART驱动轮询(5ms超时让出CPU, 避免stdio缓冲/锁与心跳printf互斥) */
 static void cmd_task(void *arg) {
     char line[128];
@@ -179,17 +189,50 @@ static void cmd_task(void *arg) {
             n = 0;
             double ts, la, lo, tz;
             SolarResult r;
-            if (strstr(line, "\"cmd\":\"get\"")) {
+            char *nline;
+            GnssFix fix;
+            if (strstr(line, "\"cmd\":\"nmea\"") && (nline = strstr(line, "\"line\""))) {
+                /* 测试注入: {"cmd":"nmea","line":"$GNRMC,..."}
+                 * 走与真实GNSS完全相同的 fix 处理链路 */
+                nline = strchr(nline, ':');
+                if (nline && *++nline == '"') {
+                    char *end = strchr(nline + 1, '"');
+                    if (end) {
+                        *end = 0;
+                        if (gnss_parse_rmc(nline + 1, &fix) == 0) handle_fix(&fix);
+                        else ESP_LOGW(TAG, "nmea注入无效: %s", nline + 1);
+                    }
+                }
+#if CONFIG_SOLAR_GNSS
+            } else if (strstr(line, "\"cmd\":\"tx1\"")) {
+                /* GNSS配置转发: {"cmd":"tx1","data":"$PCAS01,5*1D"} -> UART1 */
+                char *data = strstr(line, "\"data\"");
+                if (data && (data = strchr(data, ':')) && *++data == '"') {
+                    char *end = strchr(data + 1, '"');
+                    if (end) {
+                        *end = 0;
+                        uart_write_bytes(UART_NUM_1, data + 1, strlen(data + 1));
+                        ESP_LOGI(TAG, "tx1 -> GNSS: %s", data + 1);
+                    }
+                }
+#endif /* CONFIG_SOLAR_GNSS */
+            } else if (strstr(line, "\"cmd\":\"get\"")) {
+                xSemaphoreTake(s_out, portMAX_DELAY);
                 printf("{\"lat\":%.6f,\"lon\":%.6f,\"tz\":%g}\n",
                        g_cfg.lat, g_cfg.lon, g_cfg.tz);
+                xSemaphoreGive(s_out);
             } else if (strstr(line, "\"cmd\":\"stop\"")) {
                 g_hb = 0;
+                xSemaphoreTake(s_out, portMAX_DELAY);
                 printf("{\"ok\":\"stopped\"}\n");
+                xSemaphoreGive(s_out);
             } else if (strstr(line, "\"cmd\"") && json_num(line, "\"lat\"", &la)
                        && json_num(line, "\"lon\"", &lo) && json_num(line, "\"tz\"", &tz)) {
                 if (!json_num(line, "\"ts\"", &ts)) ts = 0;
+                xSemaphoreTake(s_out, portMAX_DELAY); /* 防主循环读撕裂 */
                 g_cfg = (SolarCfg){la, lo, tz};
                 if (ts > 0) g_t0 = (time_t)ts - time(NULL);
+                xSemaphoreGive(s_out);
                 solar_compute(&g_cfg, now_t(), &r);
                 send_json(&r);
                 if (strstr(line, "\"cmd\":\"init\"")) g_hb = 1;
@@ -202,8 +245,7 @@ static void cmd_task(void *arg) {
 }
 
 #if CONFIG_SOLAR_GNSS
-/* GNSS数据链路: ATGM336H UART1, 只消费$GNRMC; 定位防抖后等价于一次init */
-static void gnss_task(void *arg) {
+/* GNSS数据链路: ATGM336H UART1, 只消费$GNRMC; 定位防抖后等价于一次init */static void gnss_task(void *arg) {
     uart_config_t uc = {
         .baud_rate = 115200, .data_bits = UART_DATA_8_BITS,
         .parity = UART_PARITY_DISABLE, .stop_bits = UART_STOP_BITS_1,
@@ -233,22 +275,7 @@ static void gnss_task(void *arg) {
             prev = fix;
             if (!stable) continue;
 
-            g_cfg = (SolarCfg){fix.lat, fix.lon, CONFIG_SOLAR_GNSS_TZ};
-#if CONFIG_SOLAR_RTC
-            if (s_rtc_ok) {
-                struct tm *tm = gmtime(&fix.ts);
-                rtc_write(&(RtcTime){tm->tm_year + 1900, tm->tm_mon + 1,
-                                     tm->tm_mday, tm->tm_hour, tm->tm_min, tm->tm_sec});
-                ESP_LOGI(TAG, "GNSS FIX -> RTC 对时");
-            }
-#endif
-            g_t0 = fix.ts - time(NULL);
-            SolarResult r;
-            solar_compute(&g_cfg, now_t(), &r);
-            send_json(&r);
-            g_hb = 1;
-            ESP_LOGI(TAG, "GNSS FIX %.6f %.6f ts=%lld -> 心跳模式",
-                     g_cfg.lat, g_cfg.lon, (long long)fix.ts);
+            handle_fix(&fix);
         } else if (c == '\r') {
             /* 忽略 */
         } else if (n < (int)sizeof(line) - 1) {
@@ -258,6 +285,29 @@ static void gnss_task(void *arg) {
     vTaskDelete(NULL);
 }
 #endif /* CONFIG_SOLAR_GNSS */
+
+/* GNSS fix 统一处理: 更新配置->(对时RTC)->重算->应答->心跳模式
+ * (gnss_task 与 nmea 注入命令共用, 保证测试与真实链路一致) */
+static void handle_fix(const GnssFix *fix) {
+    xSemaphoreTake(s_out, portMAX_DELAY); /* 防主循环读撕裂 */
+    g_cfg = (SolarCfg){fix->lat, fix->lon, CONFIG_SOLAR_GNSS_TZ};
+    xSemaphoreGive(s_out);
+#if CONFIG_SOLAR_RTC
+    if (s_rtc_ok) {
+        struct tm *tm = gmtime(&fix->ts);
+        rtc_write(&(RtcTime){tm->tm_year + 1900, tm->tm_mon + 1,
+                             tm->tm_mday, tm->tm_hour, tm->tm_min, tm->tm_sec});
+        ESP_LOGI(TAG, "GNSS FIX -> RTC 对时");
+    }
+#endif
+    g_t0 = fix->ts - time(NULL);
+    SolarResult r;
+    solar_compute(&g_cfg, now_t(), &r);
+    send_json(&r);
+    g_hb = 1;
+    ESP_LOGI(TAG, "GNSS FIX %.6f %.6f ts=%lld -> 心跳模式",
+             g_cfg.lat, g_cfg.lon, (long long)fix->ts);
+}
 
 void app_main(void) {
     /* v6控制台默认裸寄存器轮询, 无uart驱动; 显式安装以支持阻塞读取,
@@ -278,9 +328,14 @@ void app_main(void) {
 
     for (;;) {
         if (g_hb) {
+            SolarCfg cfg;
+            xSemaphoreTake(s_out, portMAX_DELAY); /* 取一致性副本, 防写侧撕裂 */
+            cfg = g_cfg;
+            xSemaphoreGive(s_out);
+            time_t now = now_t();
             SolarResult r;
-            solar_compute(&g_cfg, now_t(), &r);
-            send_hb(now_t(), &g_cfg, &r);
+            solar_compute(&cfg, now, &r);
+            send_hb(now, &cfg, &r);
         }
         vTaskDelay(pdMS_TO_TICKS(HB_MS));
     }

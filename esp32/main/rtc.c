@@ -7,10 +7,10 @@
 
 #include "driver/i2c_master.h"
 #include "esp_log.h"
+#include "rtc_core.h"
 
 #define RTC_ADDR  0x68
 #define REG_SEC   0x00
-#define REG_CTRL  0x0E
 #define REG_STAT  0x0F
 #define REG_TEMP  0x11
 
@@ -23,9 +23,6 @@
 
 static const char *TAG = "rtc";
 static i2c_master_dev_handle_t s_dev = NULL;
-
-static uint8_t bcd2dec(uint8_t b) { return (b >> 4) * 10 + (b & 0x0F); }
-static uint8_t dec2bcd(uint8_t d) { return (d / 10) << 4 | (d % 10); }
 
 int rtc_init(void) {
     i2c_master_bus_config_t bus = {
@@ -66,34 +63,25 @@ int rtc_read(RtcTime *t) {
         return -1;
     if (st >> 7 & 1) return -1; /* OSF: 振荡器曾停振, 时间不可信 */
 
-    t->sec = bcd2dec(b[0]);
-    t->min = bcd2dec(b[1]);
-    t->hour = bcd2dec(b[2] & 0x3F);      /* 强制24小时制 */
-    t->mday = bcd2dec(b[4]);
-    int mon = bcd2dec(b[5] & 0x1F);
+    t->sec = rtc_core_bcd2dec(b[0]);
+    t->min = rtc_core_bcd2dec(b[1]);
+    t->hour = rtc_core_bcd2dec(b[2] & 0x3F);      /* 强制24小时制 */
+    t->mday = rtc_core_bcd2dec(b[4]);
+    int mon = rtc_core_bcd2dec(b[5] & 0x1F);
     int cent = b[5] >> 7 & 1;            /* 世纪位 */
-    t->year = 2000 + bcd2dec(b[6]) + (cent ? 100 : 0);
+    t->year = 2000 + rtc_core_bcd2dec(b[6]) + (cent ? 100 : 0);
     t->mon = mon;
     return 0;
 }
 
 int rtc_write(const RtcTime *t) {
     if (!s_dev) return -1;
-    /* 秒最后写: 写秒寄存器会复位分频链, 先写其余再写秒 */
-    uint8_t w[8] = {
-        REG_SEC,
-        dec2bcd(t->sec),   /* 0x00 秒(最后写) */
-        dec2bcd(t->min),   /* 0x01 */
-        dec2bcd(t->hour),  /* 0x02 24小时制(BIT6=0) */
-        1,                 /* 0x03 星期(占位) */
-        dec2bcd(t->mday),  /* 0x04 */
-        dec2bcd(t->mon),   /* 0x05 */
-        dec2bcd(t->year % 100), /* 0x06 */
-    };
-    /* 先写 01h-06h(不含秒) */
-    if (i2c_master_transmit(s_dev, w + 1, 6, 1000) != ESP_OK) return -1;
-    /* 再写 00h 秒(复位分频链, 时间自此对齐) */
-    if (i2c_master_transmit(s_dev, w, 1, 1000) != ESP_OK) return -1;
+    /* 帧结构: [寄存器指针][数据...] (rtc_core 构造, 单测覆盖)
+     * 秒最后单独写: 写秒寄存器会复位分频链 */
+    uint8_t first[7], sec_frame[2];
+    rtc_core_build(t, first, sec_frame);
+    if (i2c_master_transmit(s_dev, first, sizeof first, 1000) != ESP_OK) return -1;
+    if (i2c_master_transmit(s_dev, sec_frame, sizeof sec_frame, 1000) != ESP_OK) return -1;
     return 0;
 }
 
