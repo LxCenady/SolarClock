@@ -17,8 +17,7 @@ import sys
 import time
 
 import serial
-from astral import Observer
-from astral.sun import noon, sunrise, sunset
+from noaa_ref import solar as noaa_solar
 from timezonefinder import TimezoneFinder
 from zoneinfo import ZoneInfo
 
@@ -41,15 +40,22 @@ def tz_hours(tzname, ts):
     return off.total_seconds() / 3600.0
 
 
-def polar_safe(fn, *a, **k):
-    try:
-        return fn(*a, **k)
-    except ValueError:
-        return None
+def reference_noaa(lat, lon, tz_h, ts):
+    """NOAA 官方参考(默认), 与固件同源模型, 校验实现正确性"""
+    return noaa_solar(ts, lat, lon, tz_h)
 
 
-def reference(lat, lon, tz_h, ts):
-    """PC 端参考值(与 gen_dataset 同源, 实时计算)"""
+def reference_astral(lat, lon, tz_h, ts):
+    """astral 交叉复核(独立实现, 折射约定有 0.044° 差异)"""
+    from astral import Observer
+    from astral.sun import noon, sunrise, sunset
+
+    def polar_safe(fn, *a, **k):
+        try:
+            return fn(*a, **k)
+        except ValueError:
+            return None
+
     d = datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).date()
     obs = Observer(latitude=lat, longitude=lon)
     toff = datetime.timedelta(hours=tz_h)
@@ -63,18 +69,22 @@ def reference(lat, lon, tz_h, ts):
     if s is not None:
         exp["set"] = (s + toff).strftime("%H:%M")
     if r is None or s is None:
-        alt = 90 - __import__("astral.sun", fromlist=["zenith_and_azimuth"]).zenith_and_azimuth(obs, n)[0]
+        from astral.sun import zenith_and_azimuth
+        alt = 90 - zenith_and_azimuth(obs, n)[0]
         exp["polar"] = "day" if alt > 0 else "night"
     exp["noon"] = (n + toff).strftime("%H:%M")
     dial = (720 + ts / 60 - noon_min) % 1440
     exp["solar"] = f"{int(dial // 60):02d}:{int(dial % 60):02d}"
     eot = round(720 - lon * 4 - noon_min, 2)
-    if eot > 30:  # 太阳正午跨UTC午夜(日期变更线)时回绕
+    if eot > 30:
         eot -= 1440
     elif eot < -30:
         eot += 1440
     exp["eot"] = eot
     return exp
+
+
+REFERENCES = {"noaa": reference_noaa, "astral": reference_astral}
 
 
 def hm_min(s):
@@ -159,7 +169,10 @@ def main():
                     help="ts相对当前时间的抖动秒数, 默认±6h")
     ap.add_argument("--stream", default="/tmp/solarstream.jsonl")
     ap.add_argument("--port", default="/dev/ttyACM0")
+    ap.add_argument("--ref", choices=["noaa", "astral"], default="noaa",
+                    help="参考基准: noaa官方算法(默认) / astral交叉复核")
     args = ap.parse_args()
+    reference = REFERENCES[args.ref]
 
     random.seed(args.seed)
     ser = serial.Serial(args.port, 115200, timeout=0.5)
@@ -168,7 +181,8 @@ def main():
     ser.write(b'{"cmd":"stop"}\n')  # 清场: 退出残留心跳模式
     time.sleep(0.3)
     ser.reset_input_buffer()
-    print(f"热测试开始: {args.rounds} 轮, seed={args.seed}, 抖动±{args.jitter // 3600}h")
+    print(f"热测试开始: {args.rounds} 轮, seed={args.seed}, 抖动±{args.jitter // 3600}h"
+          f", 基准={args.ref}")
     print(f"JSON流: {args.stream} (另一终端: tail -f {args.stream})\n")
 
     ok = 0

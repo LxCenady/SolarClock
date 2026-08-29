@@ -37,16 +37,17 @@ static void sun_angles(double jd, double *decl, double *eot) {
 }
 
 /* 太阳高度角达到zen时的小时角(度); ±999 表示极昼/极夜无日出日落
- * 鲁棒性: 纬度钳制±89.8(防极点除零, 与参考库一致), c钳制±1(防FP边界NaN),
- * 极区判定带1e-9容差(防浮点在±1边界误判) */
+ * atan2(√(1-c²),c) 与 acos(c) 数学等价, 但在 c≈±1(极区边界/浅日轨)
+ * 处条件数远优于acos(其导数在此发散); 其余鲁棒性同前 */
 static double hour_angle(double lat, double decl, double zen) {
     lat = fmax(-89.8, fmin(89.8, lat));
     double c = (cos(zen * D2R) - sin(lat * D2R) * sin(decl * D2R))
                / (cos(lat * D2R) * cos(decl * D2R));
     if (c > 1.0 + 1e-9)  return 999.0;
     if (c < -1.0 - 1e-9) return -999.0;
-    c = fmax(-1.0, fmin(1.0, c));
-    return acos(c) * R2D;
+    if (c > 1.0) c = 1.0;
+    else if (c < -1.0) c = -1.0;
+    return atan2(sqrt(1.0 - c * c), c) * R2D;
 }
 
 /* 一次计算: 返回事件时刻(UTC分钟)与极区标记(polar: 0正常, 1极昼, -1极夜) */
@@ -73,14 +74,16 @@ void solar_compute(const SolarCfg *cfg, time_t utc, SolarResult *r) {
     rise_set(cfg, jd, &decl, &eot, &rise, &set, &polar);
 
     if (!polar) {
-        /* 精化: 在日出/日落/正午事件时刻重算赤纬与均时差
-         * (赤纬日内变化 ~0.3°, 高纬日轨浅会放大成分钟级误差) */
+        /* 精化(与参考库同款2次迭代): 在日出/日落/正午事件时刻重算赤纬与均时差
+         * (赤纬日内变化 ~0.3°, 高纬/跨日事件会放大成分钟级误差) */
         double d2, e2, r2, s2;
         int p2;
-        rise_set(cfg, jd + (rise - utc_min) / 1440.0, &d2, &e2, &r2, &s2, &p2);
-        if (!p2) rise = r2;
-        rise_set(cfg, jd + (set - utc_min) / 1440.0, &d2, &e2, &r2, &s2, &p2);
-        if (!p2) set = s2;
+        for (int k = 0; k < 2; k++) {
+            rise_set(cfg, jd + (rise - utc_min) / 1440.0, &d2, &e2, &r2, &s2, &p2);
+            if (!p2) rise = r2;
+            rise_set(cfg, jd + (set - utc_min) / 1440.0, &d2, &e2, &r2, &s2, &p2);
+            if (!p2) set = s2;
+        }
         rise_set(cfg, jd + ((720.0 - cfg->lon * 4.0 - eot) - utc_min) / 1440.0,
                  &d2, &e2, &r2, &s2, &p2);
         eot = e2; /* 正午精化后的均时差 */
@@ -101,9 +104,9 @@ void solar_compute(const SolarCfg *cfg, time_t utc, SolarResult *r) {
 
     r->decl      = decl;
     r->eot       = eot;
-    r->noon_min  = (int16_t)wn;
-    r->rise_min  = polar ? -1 : (int16_t)wr;
-    r->set_min   = polar ? -1 : (int16_t)ws;
+    r->noon_min  = wn;
+    r->rise_min  = polar ? -1.0 : wr;
+    r->set_min   = polar ? -1.0 : ws;
 
     /* 当地太阳时: 墙钟 + 经度修正 + 均时差 - 时区偏移, 即本地时钟上太阳走到的刻度 */
     double sm = cur + cfg->lon * 4.0 + eot - tz;

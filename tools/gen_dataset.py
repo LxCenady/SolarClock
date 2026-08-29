@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""生成 SolarTime 验证数据集: 多地区 x 随机时刻, 参考值由 astral 权威计算
+"""生成 SolarTime 验证数据集: 多地区 x 随机时刻
+
+参考值由 NOAA 官方算法计算 (tools/noaa_ref.py), 与 astral 完全独立。
 
 输出 tools/dataset.json, 每个样本含:
   ts      : UTC 时间戳
@@ -9,10 +11,9 @@
 """
 import json
 import random
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
-from astral import Observer
-from astral.sun import sunrise, noon, sunset, zenith_and_azimuth
+from noaa_ref import solar
 
 random.seed(42)
 
@@ -52,51 +53,18 @@ FORCED = {
 }
 
 
-def hhmm(dt):
-    return dt.strftime("%H:%M")
-
-
-def polar_safe(fn, *a, **k):
-    """极昼/极夜时 astral 抛 ValueError, 转为 None"""
-    try:
-        return fn(*a, **k)
-    except ValueError:
-        return None
-
-
 def sample(name, name_en, lat, lon, tz, ts):
     d = datetime.fromtimestamp(ts, tz=timezone.utc)
-    obs = Observer(latitude=lat, longitude=lon)
-    tzoff = timedelta(hours=tz)
+    r = solar(ts, lat, lon, tz)  # NOAA 官方参考
 
-    # 极昼/极夜时 sunrise()/sunset() 返回 None
-    r = polar_safe(sunrise, obs, date=d.date(), tzinfo=timezone.utc)
-    n = noon(obs, date=d.date(), tzinfo=timezone.utc)
-    s = polar_safe(sunset, obs, date=d.date(), tzinfo=timezone.utc)
-
-    exp = {"polar": None}
-    exp["noon"] = hhmm(n + tzoff)
-    # 以正午太阳高度角区分极昼/极夜 (astral 对两者都抛异常)
-    alt = 90 - zenith_and_azimuth(obs, n)[0]
-    if r is not None:
-        exp["rise"] = hhmm(r + tzoff)
-    if s is not None:
-        exp["set"] = hhmm(s + tzoff)
-    if r is None or s is None:
-        exp["polar"] = "day" if alt > 0 else "night"
-
-    # 真太阳时(表盘): 以参考正午为基准, 任意时刻 = 12:00 + (ts - noon_utc)
-    noon_utc_min = n.hour * 60 + n.minute + n.second / 60
-    ts_min = ts / 60
-    dial = (720 + ts_min - noon_utc_min) % 1440
-    exp["solar"] = f"{int(dial // 60):02d}:{int(dial % 60):02d}"
-    # 均时差(分钟): 由参考正午反推, 与固件独立计算交叉验证
-    eot = round(720 - lon * 4 - noon_utc_min, 2)
-    if eot > 30:  # 太阳正午跨UTC午夜(日期变更线)时回绕
-        eot -= 1440
-    elif eot < -30:
-        eot += 1440
-    exp["eot"] = eot
+    exp = {"polar": r["polar"]}
+    exp["noon"] = r["noon"]
+    exp["solar"] = r["solar"]
+    exp["eot"] = r["eot"]
+    if r["rise"] is not None:
+        exp["rise"] = r["rise"]
+    if r["set"] is not None:
+        exp["set"] = r["set"]
 
     return {
         "name": name, "name_en": name_en, "lat": lat, "lon": lon, "tz": tz,

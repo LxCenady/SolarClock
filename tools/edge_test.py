@@ -17,7 +17,7 @@ import time
 
 import serial
 
-from hot_test import reference, wait_json, verify, tol_min
+from hot_test import REFERENCES, wait_json, verify, tol_min
 import hot_test
 
 # (名字, 纬度, 经度, 时区, UTC时间戳, 备注)
@@ -42,7 +42,10 @@ CASES = [
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", default="/dev/ttyACM0")
+    ap.add_argument("--ref", choices=["noaa", "astral"], default="noaa",
+                    help="参考基准: noaa官方算法(默认) / astral交叉复核")
     args = ap.parse_args()
+    reference = REFERENCES[args.ref]
 
     ser = serial.Serial(args.port, 115200, timeout=0.5)
     time.sleep(2.0)

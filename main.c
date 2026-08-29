@@ -34,14 +34,15 @@ static int save_cfg(const SolarCfg *c) {
     return 0;
 }
 
-/* 分钟 -> "HH:MM" */
-static const char *hm(int min) {
+/* 分钟(小数) -> "HH:MM", 四舍五入 */
+static const char *hm(double min) {
     static char b[3][8];
     static int i;
     i = (i + 1) % 3;
-    if (min < 0) min += 1440;
-    min %= 1440;
-    sprintf(b[i], "%02d:%02d", min / 60, min % 60);
+    int m = (int)(min + 0.5);
+    m %= 1440;
+    if (m < 0) m += 1440;
+    sprintf(b[i], "%02d:%02d", m / 60, m % 60);
     return b[i];
 }
 
@@ -60,9 +61,9 @@ static void show(const SolarCfg *c, time_t t) {
     strcpy(sr, polar ? "---" : hm(r.rise_min));
     strcpy(sn, hm(r.noon_min));
     strcpy(ss, polar ? "---" : hm(r.set_min));
-    strcpy(st, polar ? (r.to_set_min == 1440.0 ? "极昼, 今日无日落"
-                                               : "极夜, 今日无日出")
-                     : hm((int)r.to_set_min));
+    strcpy(st, polar ? (r.to_set_min > 0 ? "极昼, 今日无日落"
+                                         : "极夜, 今日无日出")
+                     : hm(r.to_set_min));
 
     printf("SolarTime - 本地: %s (UTC%+g)\n"
            "GPS: %.4f°N, %.4f°E\n"

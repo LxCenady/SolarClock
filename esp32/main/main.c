@@ -1,3 +1,4 @@
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -33,13 +34,15 @@ static const char *TAG = "solartime";
 
 static time_t now_t(void) { return time(NULL) + g_t0; }
 
-static const char *hm(int min) {
-    static char b[3][8];
+/* 分钟(小数) -> "HH:MM", 四舍五入 */
+static const char *hm(double min) {
+    static char b[3][24];
     static int i;
     i = (i + 1) % 3;
-    if (min < 0) min += 1440;
-    min %= 1440;
-    snprintf(b[i], sizeof b[i], "%02d:%02d", min / 60, min % 60);
+    int m = (int)(min + 0.5);
+    m %= 1440;
+    if (m < 0) m += 1440;
+    snprintf(b[i], sizeof b[i], "%02d:%02d", m / 60, m % 60);
     return b[i];
 }
 
@@ -80,47 +83,50 @@ static void send_hb(time_t now, const SolarCfg *cfg, const SolarResult *r) {
     struct tm *tm = gmtime(&lt);
     int cur_s = (lt % 86400 + 86400) % 86400;
 
-    /* 日光进度: 极昼100 极夜0, 其余按日出日落区间钳制 */
+    /* 日光进度(亚分钟精度): 极昼100 极夜0, 其余按日出日落区间钳制 */
     int dp;
     if (polar == 1) {
         dp = 100;
     } else if (polar == -1) {
         dp = 0;
     } else {
-        int len = r->set_min - r->rise_min;
-        if (len <= 0) len += 1440;
-        int p = (cur_s / 60 - r->rise_min) * 100 / len;
-        dp = p < 0 ? 0 : p > 100 ? 100 : p;
+        double len = r->set_min - r->rise_min;
+        if (len <= 0) len += 1440.0;
+        double p = (cur_s / 60.0 - r->rise_min) * 100.0 / len;
+        dp = (int)(p + 0.5);
+        if (dp < 0) dp = 0;
+        else if (dp > 100) dp = 100;
     }
 
-    /* 日出/日落事件: ±30s 窗口 */
+    /* 日出/日落事件: ±30s 窗口, 亚分钟精度 */
     int ev = 0;
     if (!polar) {
-        long d1 = (long)(cur_s / 60 - r->rise_min) * 60 + cur_s % 60;
-        long d2 = (long)(cur_s / 60 - r->set_min) * 60 + cur_s % 60;
-        d1 = (d1 + 43200) % 86400 - 43200;
-        d2 = (d2 + 43200) % 86400 - 43200;
-        if (labs(d1) <= 30) ev = 1;
-        else if (labs(d2) <= 30) ev = 2;
+        double d1 = cur_s - r->rise_min * 60.0;
+        double d2 = cur_s - r->set_min * 60.0;
+        d1 = fmod(d1 + 43200.0, 86400.0) - 43200.0;
+        d2 = fmod(d2 + 43200.0, 86400.0) - 43200.0;
+        if (fabs(d1) <= 30.0) ev = 1;
+        else if (fabs(d2) <= 30.0) ev = 2;
     }
 
-    /* 昼夜判定 + 下一事件: ne 0白天(距日落)/1夜晚(距日出)/2极昼/3极夜 */
+    /* 昼夜判定 + 下一事件: ne 0白天(距日落)/1夜晚(距日出)/2极昼/3极夜
+     * 用亚分钟事件时刻, tne 四舍五入到分钟 */
     int ne, tne;
     if (polar == 1) {
         ne = 2; tne = 0;
     } else if (polar == -1) {
         ne = 3; tne = 0;
     } else {
-        int cur_min = cur_s / 60;
-        int wr = r->rise_min, ws = r->set_min;
-        long dr = (long)(wr - cur_min);
-        long ds = (long)(ws - cur_min);
-        if (dr <= 0) dr += 1440;
-        if (ds <= 0) ds += 1440;
+        double cur_min = cur_s / 60.0;
+        double wr = r->rise_min, ws = r->set_min;
+        double dr = wr - cur_min;
+        double ds = ws - cur_min;
+        if (dr <= 0) dr += 1440.0;
+        if (ds <= 0) ds += 1440.0;
         int day = (ws > wr) ? (cur_min >= wr && cur_min < ws)
                             : (cur_min >= wr || cur_min < ws); /* 日落跨午夜 */
-        if (day) { ne = 0; tne = (int)ds; }
-        else     { ne = 1; tne = (int)dr; }
+        if (day) { ne = 0; tne = (int)(ds + 0.5); }
+        else     { ne = 1; tne = (int)(dr + 0.5); }
     }
 
     xSemaphoreTake(s_out, portMAX_DELAY);
