@@ -6,7 +6,16 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "gnss.h"
+#include "rtc.h"
 #include "solar.h"
+
+#ifndef CONFIG_SOLAR_GNSS_UART_RX
+#define CONFIG_SOLAR_GNSS_UART_RX 17
+#endif
+#ifndef CONFIG_SOLAR_GNSS_UART_TX
+#define CONFIG_SOLAR_GNSS_UART_TX 18
+#endif
 
 /* ================= 串口协议 (纯ASCII JSON) =================
  * 请求(一行):
@@ -27,12 +36,24 @@ static SolarCfg g_cfg = {CONFIG_SOLAR_LAT, CONFIG_SOLAR_LON, CONFIG_SOLAR_TZ};
 static time_t g_t0 = 0;      /* 时间基准: 开机时对应的UTC秒 */
 static volatile int g_hb = 0; /* 心跳模式标志 */
 static SemaphoreHandle_t s_out; /* 输出互斥: 防应答与心跳printf行内交错 */
+#if CONFIG_SOLAR_RTC
+static volatile int s_rtc_ok = 0;
+#endif
 
 static const char *TAG = "solartime";
 
 #define HB_MS 100 /* 心跳周期(用户决策: 100ms=10Hz) */
 
-static time_t now_t(void) { return time(NULL) + g_t0; }
+static time_t now_t(void) {
+#if CONFIG_SOLAR_RTC
+    if (s_rtc_ok) {
+        RtcTime t;
+        if (rtc_read(&t) == 0)
+            return gnss_mkts(t.year, t.mon, t.mday, t.hour, t.min, t.sec);
+    }
+#endif
+    return time(NULL) + g_t0;
+}
 
 /* 分钟(小数) -> "HH:MM", 四舍五入 */
 static const char *hm(double min) {
@@ -180,11 +201,76 @@ static void cmd_task(void *arg) {
     vTaskDelete(NULL);
 }
 
+#if CONFIG_SOLAR_GNSS
+/* GNSS数据链路: ATGM336H UART1, 只消费$GNRMC; 定位防抖后等价于一次init */
+static void gnss_task(void *arg) {
+    uart_config_t uc = {
+        .baud_rate = 115200, .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE, .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE, .source_clk = UART_SCLK_DEFAULT,
+    };
+    uart_param_config(UART_NUM_1, &uc);
+    uart_set_pin(UART_NUM_1, CONFIG_SOLAR_GNSS_UART_TX,
+                 CONFIG_SOLAR_GNSS_UART_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    uart_driver_install(UART_NUM_1, 1024, 0, 0, NULL, 0);
+    ESP_LOGI(TAG, "GNSS UART1 RX=GPIO%d 115200 8N1", CONFIG_SOLAR_GNSS_UART_RX);
+
+    char line[128];
+    int n = 0;
+    GnssFix prev = {0}, fix;
+    for (;;) {
+        uint8_t c;
+        if (uart_read_bytes(UART_NUM_1, &c, 1, pdMS_TO_TICKS(10)) != 1) continue;
+        if (c == '\n') {
+            if (!n) continue;
+            line[n] = 0;
+            n = 0;
+            if (gnss_parse_rmc(line, &fix) != 0) continue;
+            /* 防抖: 连续两帧一致(坐标差<0.001°, 时间差<10s)才算fix */
+            int stable = prev.valid && fabs(fix.lat - prev.lat) < 0.001
+                         && fabs(fix.lon - prev.lon) < 0.001
+                         && labs((long)(fix.ts - prev.ts)) < 10;
+            prev = fix;
+            if (!stable) continue;
+
+            g_cfg = (SolarCfg){fix.lat, fix.lon, CONFIG_SOLAR_GNSS_TZ};
+#if CONFIG_SOLAR_RTC
+            if (s_rtc_ok) {
+                struct tm *tm = gmtime(&fix.ts);
+                rtc_write(&(RtcTime){tm->tm_year + 1900, tm->tm_mon + 1,
+                                     tm->tm_mday, tm->tm_hour, tm->tm_min, tm->tm_sec});
+                ESP_LOGI(TAG, "GNSS FIX -> RTC 对时");
+            }
+#endif
+            g_t0 = fix.ts - time(NULL);
+            SolarResult r;
+            solar_compute(&g_cfg, now_t(), &r);
+            send_json(&r);
+            g_hb = 1;
+            ESP_LOGI(TAG, "GNSS FIX %.6f %.6f ts=%lld -> 心跳模式",
+                     g_cfg.lat, g_cfg.lon, (long long)fix.ts);
+        } else if (c == '\r') {
+            /* 忽略 */
+        } else if (n < (int)sizeof(line) - 1) {
+            line[n++] = (char)c;
+        }
+    }
+    vTaskDelete(NULL);
+}
+#endif /* CONFIG_SOLAR_GNSS */
+
 void app_main(void) {
     /* v6控制台默认裸寄存器轮询, 无uart驱动; 显式安装以支持阻塞读取,
      * 输出侧printf仍走原控制台路径不受影响 */
     uart_driver_install(UART_NUM_0, 512, 0, 0, NULL, 0);
     s_out = xSemaphoreCreateMutex();
+
+#if CONFIG_SOLAR_RTC
+    if (rtc_init() == 0) s_rtc_ok = 1;
+#endif
+#if CONFIG_SOLAR_GNSS
+    xTaskCreatePinnedToCore(gnss_task, "gnss", 4096, NULL, 5, NULL, 1);
+#endif
 
     ESP_LOGI(TAG, "SolarTime ready, GPS: %.4f %.4f UTC%+g", g_cfg.lat, g_cfg.lon, g_cfg.tz);
 

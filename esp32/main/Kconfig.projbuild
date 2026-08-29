@@ -8,4 +8,34 @@ menu "SolarTime 配置"
     config SOLAR_TZ
         int "时区 (UTC+8 => 8)"
         default 8
+
+    config SOLAR_GNSS
+        bool "启用GNSS (ATGM336H, UART1)"
+        default n
+        help
+            解析GNRMC, 首次定位后自动进入心跳模式
+    config SOLAR_GNSS_TZ
+        int "GNSS时区 (UTC+8 => 8)"
+        default 8
+        depends on SOLAR_GNSS
+    config SOLAR_GNSS_UART_RX
+        int "GNSS TXD0 -> ESP32 RX 引脚"
+        default 17
+        depends on SOLAR_GNSS
+    config SOLAR_GNSS_UART_TX
+        int "ESP32 TX -> GNSS RXD0 引脚"
+        default 18
+        depends on SOLAR_GNSS
+
+    config SOLAR_RTC
+        bool "启用RTC (DS3231, I2C0, 0x68)"
+        default n
+    config SOLAR_RTC_SDA
+        int "RTC SDA 引脚"
+        default 8
+        depends on SOLAR_RTC
+    config SOLAR_RTC_SCL
+        int "RTC SCL 引脚"
+        default 9
+        depends on SOLAR_RTC
 endmenu
