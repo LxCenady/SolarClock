@@ -16,6 +16,9 @@ typedef struct {
  * 返回 0=有效fix, 负数=无效(原因): -1非RMC -2校验和错 -3字段不足 -4状态非A -5时间/日期缺 */
 int gnss_parse_rmc(const char *line, GnssFix *f);
 
+/* 解析GGA的定位质量与卫星数(诊断用): 返回0=成功, *sats=可见卫星数 */
+int gnss_parse_gga(const char *line, int *sats);
+
 /* 十进制时间->unix秒(UTC, 与timezone/库无关的确定性实现) */
 time_t gnss_mkts(int year, int mon, int day, int hh, int mm, int ss);
 

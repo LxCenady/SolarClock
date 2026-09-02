@@ -66,6 +66,10 @@ class SolarLink:
             if "dp" in r:
                 return r
 
+    def read_event(self, timeout=1.0):
+        """读任意JSON事件: 心跳(dp) / 搜星状态(gnss) / 其他; 超时返回None"""
+        return self._read_json(timeout=timeout)
+
     def stop(self):
         try:
             self._send({"cmd": "stop"})

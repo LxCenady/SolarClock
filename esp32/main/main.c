@@ -19,6 +19,9 @@
 #ifndef CONFIG_SOLAR_GNSS_TZ
 #define CONFIG_SOLAR_GNSS_TZ 8
 #endif
+#ifndef CONFIG_SOLAR_GNSS_BAUD
+#define CONFIG_SOLAR_GNSS_BAUD 115200
+#endif
 
 /* ================= 串口协议 (纯ASCII JSON) =================
  * 请求(一行):
@@ -51,7 +54,7 @@ static time_t now_t(void) {
 #if CONFIG_SOLAR_RTC
     if (s_rtc_ok) {
         RtcTime t;
-        if (rtc_read(&t) == 0)
+        if (ds3231_read(&t) == 0)
             return gnss_mkts(t.year, t.mon, t.mday, t.hour, t.min, t.sec);
     }
 #endif
@@ -231,7 +234,17 @@ static void cmd_task(void *arg) {
                 if (!json_num(line, "\"ts\"", &ts)) ts = 0;
                 xSemaphoreTake(s_out, portMAX_DELAY); /* 防主循环读撕裂 */
                 g_cfg = (SolarCfg){la, lo, tz};
-                if (ts > 0) g_t0 = (time_t)ts - time(NULL);
+                if (ts > 0) {
+                    g_t0 = (time_t)ts - time(NULL);
+#if CONFIG_SOLAR_RTC
+                    if (s_rtc_ok) { /* 显式注入的时间同步进RTC, 保持时间源一致 */
+                        struct tm *tm = gmtime(&(time_t){ts});
+                        ds3231_write(&(RtcTime){tm->tm_year + 1900, tm->tm_mon + 1,
+                                             tm->tm_mday, tm->tm_hour, tm->tm_min,
+                                             tm->tm_sec});
+                    }
+#endif
+                }
                 xSemaphoreGive(s_out);
                 solar_compute(&g_cfg, now_t(), &r);
                 send_json(&r);
@@ -245,9 +258,20 @@ static void cmd_task(void *arg) {
 }
 
 #if CONFIG_SOLAR_GNSS
-/* GNSS数据链路: ATGM336H UART1, 只消费$GNRMC; 定位防抖后等价于一次init */static void gnss_task(void *arg) {
+/* 发送$PCAS配置命令(自动加校验和)到UART1 */
+static void pcas_send(const char *body) {
+    char buf[96];
+    int n = snprintf(buf, sizeof buf, "$%s", body);
+    unsigned char cs = 0;
+    for (int i = 1; i < n; i++) cs ^= (unsigned char)buf[i];
+    n += snprintf(buf + n, sizeof buf - n, "*%02X\r\n", cs);
+    uart_write_bytes(UART_NUM_1, buf, n);
+}
+
+/* GNSS数据链路: ATGM336H UART1, 只消费$GNRMC/$GNGGA; 定位防抖后等价于一次init */
+static void gnss_task(void *arg) {
     uart_config_t uc = {
-        .baud_rate = 115200, .data_bits = UART_DATA_8_BITS,
+        .baud_rate = CONFIG_SOLAR_GNSS_BAUD, .data_bits = UART_DATA_8_BITS,
         .parity = UART_PARITY_DISABLE, .stop_bits = UART_STOP_BITS_1,
         .flow_ctrl = UART_HW_FLOWCTRL_DISABLE, .source_clk = UART_SCLK_DEFAULT,
     };
@@ -255,10 +279,21 @@ static void cmd_task(void *arg) {
     uart_set_pin(UART_NUM_1, CONFIG_SOLAR_GNSS_UART_TX,
                  CONFIG_SOLAR_GNSS_UART_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
     uart_driver_install(UART_NUM_1, 1024, 0, 0, NULL, 0);
-    ESP_LOGI(TAG, "GNSS UART1 RX=GPIO%d 115200 8N1", CONFIG_SOLAR_GNSS_UART_RX);
+    ESP_LOGI(TAG, "GNSS UART1 RX=GPIO%d %d 8N1", CONFIG_SOLAR_GNSS_UART_RX, CONFIG_SOLAR_GNSS_BAUD);
+
+    /* 开机自动配置: 只留GGA+RMC(搜星诊断+定位), 保存, 每次上电冷启动重新搜星 */
+    vTaskDelay(pdMS_TO_TICKS(300));
+    pcas_send("PCAS03,1,0,0,0,1,0,0,0,0,0,0,0,0,0");
+    vTaskDelay(pdMS_TO_TICKS(200));
+    pcas_send("PCAS00");
+    vTaskDelay(pdMS_TO_TICKS(200));
+    pcas_send("PCAS10,2"); /* 冷启动: 清星历, 每次上电强制重新搜星 */
+    ESP_LOGI(TAG, "GNSS 配置已下发(GGA+RMC) + 冷启动搜星");
 
     char line[128];
     int n = 0;
+    int v_cnt = 0;    /* 未定位帧计数 */
+    int sats = 0;     /* GGA可见卫星数 */
     GnssFix prev = {0}, fix;
     for (;;) {
         uint8_t c;
@@ -267,15 +302,27 @@ static void cmd_task(void *arg) {
             if (!n) continue;
             line[n] = 0;
             n = 0;
-            if (gnss_parse_rmc(line, &fix) != 0) continue;
-            /* 防抖: 连续两帧一致(坐标差<0.001°, 时间差<10s)才算fix */
-            int stable = prev.valid && fabs(fix.lat - prev.lat) < 0.001
-                         && fabs(fix.lon - prev.lon) < 0.001
-                         && labs((long)(fix.ts - prev.ts)) < 10;
-            prev = fix;
-            if (!stable) continue;
-
-            handle_fix(&fix);
+            int rc = gnss_parse_rmc(line, &fix);
+            if (rc == -4) { /* 模块活着但未定位(V帧) */
+                v_cnt++;
+                /* 搜星状态JSON(1Hz, TUI显示搜星过程) */
+                xSemaphoreTake(s_out, portMAX_DELAY);
+                printf("{\"gnss\":\"search\",\"v\":%d,\"sats\":%d}\n", v_cnt, sats);
+                xSemaphoreGive(s_out);
+                continue;
+            }
+            if (rc == 0) {
+                /* 防抖: 连续两帧一致(坐标差<0.001°, 时间差<10s)才算fix */
+                int stable = prev.valid && fabs(fix.lat - prev.lat) < 0.001
+                             && fabs(fix.lon - prev.lon) < 0.001
+                             && labs((long)(fix.ts - prev.ts)) < 10;
+                prev = fix;
+                if (stable) handle_fix(&fix);
+                continue;
+            }
+            /* 非RMC: 尝试GGA取卫星数 */
+            int s;
+            if (gnss_parse_gga(line, &s) == 0) sats = s;
         } else if (c == '\r') {
             /* 忽略 */
         } else if (n < (int)sizeof(line) - 1) {
@@ -295,7 +342,7 @@ static void handle_fix(const GnssFix *fix) {
 #if CONFIG_SOLAR_RTC
     if (s_rtc_ok) {
         struct tm *tm = gmtime(&fix->ts);
-        rtc_write(&(RtcTime){tm->tm_year + 1900, tm->tm_mon + 1,
+        ds3231_write(&(RtcTime){tm->tm_year + 1900, tm->tm_mon + 1,
                              tm->tm_mday, tm->tm_hour, tm->tm_min, tm->tm_sec});
         ESP_LOGI(TAG, "GNSS FIX -> RTC 对时");
     }
@@ -316,7 +363,7 @@ void app_main(void) {
     s_out = xSemaphoreCreateMutex();
 
 #if CONFIG_SOLAR_RTC
-    if (rtc_init() == 0) s_rtc_ok = 1;
+    if (ds3231_init() == 0) s_rtc_ok = 1;
 #endif
 #if CONFIG_SOLAR_GNSS
     xTaskCreatePinnedToCore(gnss_task, "gnss", 4096, NULL, 5, NULL, 1);

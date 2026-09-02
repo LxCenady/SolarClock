@@ -23,6 +23,24 @@ def clear_screen():
     return "\x1b[2J\x1b[H"
 
 
+def render_search(hb):
+    """GNSS搜星中状态渲染(未定位)"""
+    v = hb.get("v", 0)
+    sats = hb.get("sats", 0)
+    lines = [
+        " SolarClock  GNSS acquiring",
+        "",
+        f" waiting for fix...  V{frames(v)}  sats {sats}",
+        "",
+        " (outdoor/open-sky for first fix)",
+    ]
+    return "\x1b[H" + "\n".join(lines) + "\n\x1b[?25l"
+
+
+def frames(v):
+    return str(v)
+
+
 def render(hb):
     """hb: 心跳dict -> ANSI多行字符串(固定行数, 无闪烁)"""
     p = hb.get("p", 0)

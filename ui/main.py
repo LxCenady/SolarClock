@@ -25,7 +25,7 @@ from timezonefinder import TimezoneFinder
 from zoneinfo import ZoneInfo
 
 from link import SolarLink
-from render import clear_screen, render
+from render import clear_screen, render, render_search
 
 CACHE = os.path.expanduser("~/.solarclock.json")
 PORT = "/dev/ttyACM0"
@@ -134,7 +134,8 @@ def main():
         return 0 if _config_mode() else 1
 
     delta_h = 0.0
-    # ---- 坐标来源: -r > --local > -L/-O/-T > 本地缓存 > ESP32默认 ----
+    gnss_mode = False
+    # ---- 坐标来源: -r > --local > -L/-O/-T > (默认GNSS监听模式) ----
     if args.r:
         lat, lon, tz = _rand_point()
         print(f"[random] lat={lat} lon={lon} tz={tz}")
@@ -148,14 +149,10 @@ def main():
     elif args.lat is not None and args.lon is not None and args.tz is not None:
         lat, lon, tz = args.lat, args.lon, args.tz
     else:
-        cache = _load_cache()
-        if cache:
-            lat, lon, tz = cache["lat"], cache["lon"], cache["tz"]
-            delta_h = cache.get("delta_h", 0.0)
-            print(f"[cache] lat={lat} lon={lon} tz={tz} 时间偏移{delta_h:+.1f}h")
-        else:
-            lat, lon, tz = None, None, None
-            print("[default] 使用ESP32内置坐标")
+        # 默认: GNSS 监听模式, 不注入init, 等硬件定位后心跳
+        gnss_mode = True
+        lat = lon = tz = None
+        print("[gnss] 监听ESP32的GNSS定位, 搜星中...")
 
     state = ST_DISC
     link = None
@@ -169,7 +166,10 @@ def main():
                 except Exception as e:
                     print(f"[error] 无法打开 {args.port}: {e}")
                     return 1
-                state = ST_INIT
+                state = ST_LIVE if gnss_mode else ST_INIT
+                if gnss_mode:
+                    sys.stdout.write(clear_screen() + "\x1b[?25l")
+                    sys.stdout.flush()
 
             elif state == ST_INIT:
                 ts = args.ts if args.ts is not None \
@@ -195,15 +195,20 @@ def main():
                 state = ST_LIVE
 
             elif state == ST_LIVE:
-                hb = link.heartbeat(timeout=1.0)
-                if hb is None:
+                ev = link.read_event(timeout=1.0)
+                if ev is None:
                     missing += 1
-                    if missing > 5:
+                    if missing > 5 and not gnss_mode:
                         print("\x1b[0m[error] 心跳丢失, 退出")
                         state = ST_QUIT
                     continue
                 missing = 0
-                sys.stdout.write(render(hb))
+                if ev.get("gnss") == "search":
+                    sys.stdout.write(render_search(ev))
+                elif "dp" in ev:
+                    sys.stdout.write(render(ev))
+                else:
+                    continue
                 sys.stdout.flush()
 
             # 键盘

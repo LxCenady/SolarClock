@@ -24,7 +24,7 @@
 static const char *TAG = "rtc";
 static i2c_master_dev_handle_t s_dev = NULL;
 
-int rtc_init(void) {
+int ds3231_init(void) {
     i2c_master_bus_config_t bus = {
         .i2c_port = I2C_NUM_0,
         .sda_io_num = CONFIG_SOLAR_RTC_SDA,
@@ -53,7 +53,7 @@ int rtc_init(void) {
     return 0;
 }
 
-int rtc_read(RtcTime *t) {
+int ds3231_read(RtcTime *t) {
     if (!s_dev) return -1;
     uint8_t b[7];
     if (i2c_master_transmit_receive(s_dev, (uint8_t[]){REG_SEC}, 1, b, 7, 1000) != ESP_OK)
@@ -74,7 +74,7 @@ int rtc_read(RtcTime *t) {
     return 0;
 }
 
-int rtc_write(const RtcTime *t) {
+int ds3231_write(const RtcTime *t) {
     if (!s_dev) return -1;
     /* 帧结构: [寄存器指针][数据...] (rtc_core 构造, 单测覆盖)
      * 秒最后单独写: 写秒寄存器会复位分频链 */
@@ -82,10 +82,13 @@ int rtc_write(const RtcTime *t) {
     rtc_core_build(t, first, sec_frame);
     if (i2c_master_transmit(s_dev, first, sizeof first, 1000) != ESP_OK) return -1;
     if (i2c_master_transmit(s_dev, sec_frame, sizeof sec_frame, 1000) != ESP_OK) return -1;
+    /* OSF 需显式写0清除(写时间不会自动清), 清除后时间才可信 */
+    uint8_t st[2] = {REG_STAT, 0x00};
+    if (i2c_master_transmit(s_dev, st, 2, 1000) != ESP_OK) return -1;
     return 0;
 }
 
-int rtc_temp(float *celsius) {
+int ds3231_temp(float *celsius) {
     if (!s_dev) return -1;
     uint8_t b[2];
     if (i2c_master_transmit_receive(s_dev, (uint8_t[]){REG_TEMP}, 1, b, 2, 1000) != ESP_OK)

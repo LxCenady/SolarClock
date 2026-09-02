@@ -26,6 +26,10 @@ menu "SolarTime 配置"
         int "ESP32 TX -> GNSS RXD0 引脚"
         default 18
         depends on SOLAR_GNSS
+    config SOLAR_GNSS_BAUD
+        int "GNSS UART 波特率 (5N=9600, 6N=115200)"
+        default 115200
+        depends on SOLAR_GNSS
 
     config SOLAR_RTC
         bool "启用RTC (DS3231, I2C0, 0x68)"

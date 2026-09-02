@@ -79,3 +79,15 @@ int gnss_parse_rmc(const char *line, GnssFix *f) {
     f->valid = 1;
     return 0;
 }
+
+int gnss_parse_gga(const char *line, int *sats) {
+    if (strncmp(line, "$GNGGA", 6) && strncmp(line, "$GPGGA", 6)) return -1;
+    if (!nmea_checksum(line)) return -2;
+    char fld[20][16];
+    int n = nmea_split(line, fld, 20);
+    /* $GNGGA,time,lat,N,lon,E,qual,sats,hdop,... */
+    if (n < 8) return -3;
+    if (fld[7][0] < '0' || fld[7][0] > '9') return -4; /* 卫星数字段空 */
+    *sats = atoi(fld[7]);
+    return 0;
+}
