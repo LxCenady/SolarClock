@@ -7,6 +7,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "gnss.h"
+#include "lcd.h"
 #include "rtc.h"
 #include "solar.h"
 
@@ -162,17 +163,24 @@ static void send_hb(time_t now, const SolarCfg *cfg, const SolarResult *r) {
     }
 
     xSemaphoreTake(s_out, portMAX_DELAY);
-    printf("{\"t\":\"%02d:%02d:%02d\",\"d\":\"%02d-%02d\",\"s\":\"%02d:%02d\","
-           "\"r\":\"%s\",\"st\":\"%s\",\"ne\":%d,\"tne\":%d,\"dp\":%d,\"ev\":%d,"
-           "\"p\":%d,\"la\":%.4f,\"lo\":%.4f}\n",
-           tm->tm_hour, tm->tm_min, tm->tm_sec,
-           tm->tm_mon + 1, tm->tm_mday,
-           sm / 60, sm % 60,
-           polar ? "--" : hm(r->rise_min),
-           polar ? "--" : hm(r->set_min),
-           ne, tne, dp, ev, polar,
-           cfg->lat, cfg->lon);
+    char hb[220];
+    snprintf(hb, sizeof hb,
+             "{\"t\":\"%02d:%02d:%02d\",\"d\":\"%02d-%02d\",\"s\":\"%02d:%02d\","
+             "\"r\":\"%s\",\"st\":\"%s\",\"ne\":%d,\"tne\":%d,\"dp\":%d,\"ev\":%d,"
+             "\"p\":%d,\"la\":%.4f,\"lo\":%.4f}",
+             tm->tm_hour, tm->tm_min, tm->tm_sec,
+             tm->tm_mon + 1, tm->tm_mday,
+             sm / 60, sm % 60,
+             polar ? "--" : hm(r->rise_min),
+             polar ? "--" : hm(r->set_min),
+             ne, tne, dp, ev, polar,
+             cfg->lat, cfg->lon);
+    printf("%s\n", hb);
     xSemaphoreGive(s_out);
+
+#if CONFIG_SOLAR_LCD
+    lcd_render_hb(hb);
+#endif
 }
 
 static void handle_fix(const GnssFix *fix);
@@ -305,10 +313,13 @@ static void gnss_task(void *arg) {
             int rc = gnss_parse_rmc(line, &fix);
             if (rc == -4) { /* 模块活着但未定位(V帧) */
                 v_cnt++;
-                /* 搜星状态JSON(1Hz, TUI显示搜星过程) */
+                /* 搜星状态JSON(1Hz, TUI显示搜星过程) + LCD搜星界面 */
                 xSemaphoreTake(s_out, portMAX_DELAY);
                 printf("{\"gnss\":\"search\",\"v\":%d,\"sats\":%d}\n", v_cnt, sats);
                 xSemaphoreGive(s_out);
+#if CONFIG_SOLAR_LCD
+                lcd_render_search(v_cnt, sats);
+#endif
                 continue;
             }
             if (rc == 0) {
@@ -354,6 +365,10 @@ static void handle_fix(const GnssFix *fix) {
     g_hb = 1;
     ESP_LOGI(TAG, "GNSS FIX %.6f %.6f ts=%lld -> 心跳模式",
              g_cfg.lat, g_cfg.lon, (long long)fix->ts);
+#if CONFIG_SOLAR_LCD
+    /* 定位后直接进入心跳渲染(无过渡动画) */
+    (void)0;
+#endif
 }
 
 void app_main(void) {
@@ -364,6 +379,10 @@ void app_main(void) {
 
 #if CONFIG_SOLAR_RTC
     if (ds3231_init() == 0) s_rtc_ok = 1;
+#endif
+#if CONFIG_SOLAR_LCD
+    if (lcd_init() == 0) ESP_LOGI(TAG, "LCD ready");
+    else ESP_LOGW(TAG, "LCD init failed");
 #endif
 #if CONFIG_SOLAR_GNSS
     xTaskCreatePinnedToCore(gnss_task, "gnss", 4096, NULL, 5, NULL, 1);

@@ -42,4 +42,34 @@ menu "SolarTime 配置"
         int "RTC SCL 引脚"
         default 9
         depends on SOLAR_RTC
+
+    config SOLAR_LCD
+        bool "启用LCD (ST7789 240x240 SPI)"
+        default n
+        help
+            ST7789 SPI, 渲染心跳数据
+    config SOLAR_LCD_PIN_SCK
+        int "LCD SCK 引脚"
+        default 11
+        depends on SOLAR_LCD
+    config SOLAR_LCD_PIN_MOSI
+        int "LCD MOSI 引脚"
+        default 12
+        depends on SOLAR_LCD
+    config SOLAR_LCD_PIN_DC
+        int "LCD DC 引脚"
+        default 13
+        depends on SOLAR_LCD
+    config SOLAR_LCD_PIN_RES
+        int "LCD RES 引脚"
+        default 14
+        depends on SOLAR_LCD
+    config SOLAR_LCD_PIN_CS
+        int "LCD CS 引脚"
+        default 15
+        depends on SOLAR_LCD
+    config SOLAR_LCD_PIN_BLK
+        int "LCD BLK 引脚"
+        default 16
+        depends on SOLAR_LCD
 endmenu
