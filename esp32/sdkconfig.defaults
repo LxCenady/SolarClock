@@ -1,2 +1,6 @@
 CONFIG_IDF_TARGET="esp32s3"
 # 本板无原生USB口, 控制台走 UART0 -> CH340 (ttyACM0)
+
+# CPU1高频短超时轮询任务(cmd/gnss)导致IDLE1喂狗延迟误报, 关闭IDLE检查(任务本身仍受watchdog监控)
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
+CONFIG_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
