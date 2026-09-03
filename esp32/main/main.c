@@ -8,6 +8,7 @@
 #include "freertos/task.h"
 #include "gnss.h"
 #include "lcd.h"
+#include "nvs_flash.h"
 #include "rtc.h"
 #include "solar.h"
 
@@ -179,11 +180,17 @@ static void send_hb(time_t now, const SolarCfg *cfg, const SolarResult *r) {
     xSemaphoreGive(s_out);
 
 #if CONFIG_SOLAR_LCD
-    lcd_render_hb(hb);
+    /* LCD只按秒刷新(1Hz), 降功耗与SPI负担 */
+    static int s_lcd_last_sec = -1;
+    if (tm->tm_sec != s_lcd_last_sec) {
+        s_lcd_last_sec = tm->tm_sec;
+        lcd_render_hb(hb);
+    }
 #endif
 }
 
 static void handle_fix(const GnssFix *fix);
+static void nvs_save_cfg(const SolarCfg *c);
 
 /* 串口命令: 原始UART驱动轮询(5ms超时让出CPU, 避免stdio缓冲/锁与心跳printf互斥) */
 static void cmd_task(void *arg) {
@@ -318,7 +325,7 @@ static void gnss_task(void *arg) {
                 printf("{\"gnss\":\"search\",\"v\":%d,\"sats\":%d}\n", v_cnt, sats);
                 xSemaphoreGive(s_out);
 #if CONFIG_SOLAR_LCD
-                lcd_render_search(v_cnt, sats);
+                if (!g_hb) lcd_render_search(v_cnt, sats); /* 心跳模式下不覆盖面板 */
 #endif
                 continue;
             }
@@ -365,9 +372,51 @@ static void handle_fix(const GnssFix *fix) {
     g_hb = 1;
     ESP_LOGI(TAG, "GNSS FIX %.6f %.6f ts=%lld -> 心跳模式",
              g_cfg.lat, g_cfg.lon, (long long)fix->ts);
-#if CONFIG_SOLAR_LCD
-    /* 定位后直接进入心跳渲染(无过渡动画) */
-    (void)0;
+    /* 坐标移动才写NVS(防flash磨损): 与上次fix差>0.001° */
+    static double s_last_lat = 1e9, s_last_lon;
+    if (fabs(g_cfg.lat - s_last_lat) > 0.001 || fabs(g_cfg.lon - s_last_lon) > 0.001) {
+        s_last_lat = g_cfg.lat;
+        s_last_lon = g_cfg.lon;
+        nvs_save_cfg(&g_cfg);
+        ESP_LOGI(TAG, "坐标已存NVS");
+    }
+}
+
+/* ============ NVS 持久化: 坐标缓存(充电宝独立运行, 室内无fix也能用) ============ */
+#define NVS_KEY "cfg"
+static void nvs_load_cfg(SolarCfg *c) {
+    nvs_handle_t h;
+    if (nvs_open(NVS_KEY, NVS_READONLY, &h) != ESP_OK) return;
+    double v[3];
+    size_t len = sizeof v;
+    if (nvs_get_blob(h, "llt", v, &len) == ESP_OK && len == sizeof v
+        && v[0] >= -90 && v[0] <= 90 && v[1] >= -180 && v[1] <= 180) {
+        c->lat = v[0];
+        c->lon = v[1];
+        c->tz = v[2];
+        ESP_LOGI(TAG, "NVS缓存坐标: %.4f %.4f UTC%+g", c->lat, c->lon, c->tz);
+    }
+    nvs_close(h);
+}
+
+static void nvs_save_cfg(const SolarCfg *c) {
+    nvs_handle_t h;
+    if (nvs_open(NVS_KEY, NVS_READWRITE, &h) != ESP_OK) return;
+    double v[3] = {c->lat, c->lon, c->tz};
+    nvs_set_blob(h, "llt", v, sizeof v);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+/* RTC时间是否可信: OSF=0 且年份合理(2024-2099), 排除出厂默认/丢电后 */
+static int rtc_trusted(void) {
+#if CONFIG_SOLAR_RTC
+    if (!s_rtc_ok) return 0;
+    RtcTime t;
+    if (ds3231_read(&t) != 0) return 0;
+    return t.year >= 2024 && t.year <= 2099;
+#else
+    return 0;
 #endif
 }
 
@@ -376,6 +425,12 @@ void app_main(void) {
      * 输出侧printf仍走原控制台路径不受影响 */
     uart_driver_install(UART_NUM_0, 512, 0, 0, NULL, 0);
     s_out = xSemaphoreCreateMutex();
+
+    esp_err_t nr = nvs_flash_init();
+    if (nr == ESP_ERR_NVS_NO_FREE_PAGES || nr == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        nvs_flash_erase();
+        nvs_flash_init();
+    }
 
 #if CONFIG_SOLAR_RTC
     if (ds3231_init() == 0) s_rtc_ok = 1;
@@ -387,6 +442,21 @@ void app_main(void) {
 #if CONFIG_SOLAR_GNSS
     xTaskCreatePinnedToCore(gnss_task, "gnss", 4096, NULL, 5, NULL, 1);
 #endif
+
+    /* 充电宝独立运行: 读NVS上次坐标覆盖默认 */
+    nvs_load_cfg(&g_cfg);
+
+    /* RTC时间可信(持续供电/上次已对时) -> 直接用缓存坐标+RTC时间进心跳,
+     * 即使室内无GNSS fix也能作为正常时钟显示 */
+    if (rtc_trusted()) {
+        g_hb = 1;
+        ESP_LOGI(TAG, "RTC时间可信, 直接进入心跳模式(缓存坐标)");
+    } else {
+        ESP_LOGW(TAG, "RTC时间不可信, 等待GNSS定位对时");
+#if CONFIG_SOLAR_LCD
+        lcd_render_search(0, 0); /* 立即显示搜星画面, 不等首个V帧(消除黑屏) */
+#endif
+    }
 
     ESP_LOGI(TAG, "SolarTime ready, GPS: %.4f %.4f UTC%+g", g_cfg.lat, g_cfg.lon, g_cfg.tz);
 
