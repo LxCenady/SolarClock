@@ -124,6 +124,12 @@ def verify(lat, lon, tz_h, ts, r, exp, stream):
                 warns.append(msg + " (>72°折射约定边界, 降级警告)")
             else:
                 fails.append(msg)
+        elif r.get("polar") != polar:
+            msg = f"polar got {r.get('polar')} exp {polar}"
+            if abs(lat) > 72:
+                warns.append(msg + " (>72°折射约定边界, 降级警告)")
+            else:
+                fails.append(msg)
         return fails, warns
     if polar:
         if r.get("polar") != polar:

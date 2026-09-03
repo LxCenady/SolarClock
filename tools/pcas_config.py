@@ -4,10 +4,10 @@
 功能:
   1. 校验和生成:  -c "$PCAS01,5"  -> 输出带校验和的完整命令
   2. 命令发送:    通过ESP32固件 tx1 命令转发到 GNSS UART1
-  3. 一键初始化:   python3 tools/pcas_config.py setup  (115200/1Hz/只留RMC/保存)
+  3. 一键初始化:   python3 tools/pcas_config.py setup  (115200/1Hz/GGA+RMC/保存)
 
 用法:
-  python3 tools/pcas_config.py -c "$PCAS03,0,0,0,0,1,0,0,0,0,0,0,0,0,0"
+  python3 tools/pcas_config.py cs "$PCAS03,1,0,0,0,1,0,0,0,0,0,0,0,0,0"
   python3 tools/pcas_config.py send "$PCAS01,5*1D"
   python3 tools/pcas_config.py setup [--port /dev/ttyACM0]
 """
@@ -37,14 +37,15 @@ COMMANDS = {
     "rate2hz": "PCAS02,500",         # 2Hz
     "rate5hz": "PCAS02,200",         # 5Hz
     "rate10hz": "PCAS02,100",        # 10Hz
-    "only_rmc": "PCAS03,0,0,0,0,1,0,0,0,0,0,0,0,0,0",  # 只留RMC
+    "only_rmc": "PCAS03,0,0,0,0,1,0,0,0,0,0,0,0,0,0",  # 只留RMC(会关闭GGA, 固件搜星sats将恒为0)
+    "gga_rmc":  "PCAS03,1,0,0,0,1,0,0,0,0,0,0,0,0,0",  # GGA+RMC(与固件gnss_task默认一致)
     "gps_bds": "PCAS04,3",           # GPS+BDS双模
     "cold":   "PCAS10,2",            # 冷启动
     "hot":    "PCAS10,0",            # 热启动
     "reset":  "PCAS10,3",            # 出厂复位
 }
 
-SETUP_SEQ = ["baud115", "rate1hz", "only_rmc", "gps_bds", "save", "cold"]
+SETUP_SEQ = ["baud115", "rate1hz", "gga_rmc", "gps_bds", "save", "cold"]
 
 
 def send_tx1(ser, cmd):
@@ -63,7 +64,7 @@ def main():
     s = sub.add_parser("send", help="发送命令(可带校验和): send '$PCAS01,5*1D'")
     s.add_argument("cmd")
 
-    st = sub.add_parser("setup", help="一键初始化: 115200/1Hz/只留RMC/GPS+BDS/保存/冷启动")
+    st = sub.add_parser("setup", help="一键初始化: 115200/1Hz/GGA+RMC/GPS+BDS/保存/冷启动")
     args = ap.parse_args()
 
     import serial

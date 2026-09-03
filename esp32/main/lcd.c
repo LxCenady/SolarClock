@@ -17,6 +17,7 @@
 #include "esp_lcd_panel_st7789.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 #define LCD_HOST SPI2_HOST
@@ -54,6 +55,7 @@
 static const char *TAG = "lcd";
 static esp_lcd_panel_handle_t s_panel = NULL;
 static uint16_t *s_buf = NULL;
+static SemaphoreHandle_t s_lcd_mutex = NULL;
 
 /* ---- 极简5x7 ASCII字体(0x20-0x7E) ---- */
 #include "lcd_font.h"
@@ -152,6 +154,9 @@ int lcd_init(void) {
     s_buf = heap_caps_malloc(LCD_H_RES * 2, MALLOC_CAP_DMA);
     if (!s_buf) return -1;
 
+    s_lcd_mutex = xSemaphoreCreateMutex();
+    if (!s_lcd_mutex) return -1;
+
     lcd_fill(0, 0, LCD_H_RES, LCD_V_RES, rgb565(0, 0, 0)); /* 清黑屏 */
     ESP_LOGI(TAG, "ST7789 240x240 initialized");
     return 0;
@@ -184,7 +189,8 @@ static void json_get(const char *json, const char *key, char *out, int n) {
 }
 
 void lcd_render_search(int v_frames, int sats) {
-    if (!s_panel) return;
+    if (!s_panel || !s_buf || !s_lcd_mutex) return;
+    xSemaphoreTake(s_lcd_mutex, portMAX_DELAY);
     uint16_t W = rgb565(255, 255, 255), K = rgb565(0, 0, 0);
     uint16_t Y = rgb565(255, 255, 0), D = rgb565(128, 128, 128);
     char line[40];
@@ -198,10 +204,12 @@ void lcd_render_search(int v_frames, int sats) {
     lcd_fill(0, LINE_Y(1), LCD_H_RES, FONT_STEP, K);
     lcd_fill(0, LINE_Y(4), LCD_H_RES, FONT_STEP, K);
     lcd_fill(0, LINE_Y(6), LCD_H_RES, LCD_V_RES - LINE_Y(6), K);
+    xSemaphoreGive(s_lcd_mutex);
 }
 
 void lcd_render_hb(const char *hb_json) {
-    if (!s_panel) return;
+    if (!s_panel || !s_buf || !s_lcd_mutex) return;
+    xSemaphoreTake(s_lcd_mutex, portMAX_DELAY);
     /* 颜色一律经 rgb565() 保证字节序正确 */
     uint16_t FG = rgb565(255, 255, 255), BG = rgb565(0, 0, 0);
     uint16_t ACCENT = rgb565(0, 255, 0), DIM = rgb565(128, 128, 128);
@@ -243,4 +251,5 @@ void lcd_render_hb(const char *hb_json) {
     lcd_line(5, line, FG, BG);
     /* 行6: 空行(预留事件区) */
     lcd_fill(0, LINE_Y(6), LCD_H_RES, FONT_STEP, BG);
+    xSemaphoreGive(s_lcd_mutex);
 }

@@ -6,7 +6,7 @@ menu "SolarTime 配置"
         float "经度 (东正西负)"
         default 121.4737
     config SOLAR_TZ
-        int "时区 (UTC+8 => 8)"
+        float "时区 (UTC+8 => 8, 支持小数如5.5)"
         default 8
 
     config SOLAR_GNSS
@@ -15,7 +15,7 @@ menu "SolarTime 配置"
         help
             解析GNRMC, 首次定位后自动进入心跳模式
     config SOLAR_GNSS_TZ
-        int "GNSS时区 (UTC+8 => 8)"
+        float "GNSS时区 (UTC+8 => 8, 支持小数如5.5)"
         default 8
         depends on SOLAR_GNSS
     config SOLAR_GNSS_UART_RX
@@ -28,7 +28,7 @@ menu "SolarTime 配置"
         depends on SOLAR_GNSS
     config SOLAR_GNSS_BAUD
         int "GNSS UART 波特率 (5N=9600, 6N=115200)"
-        default 115200
+        default 9600
         depends on SOLAR_GNSS
 
     config SOLAR_RTC

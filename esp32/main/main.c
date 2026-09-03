@@ -60,7 +60,12 @@ static time_t now_t(void) {
             return gnss_mkts(t.year, t.mon, t.mday, t.hour, t.min, t.sec);
     }
 #endif
-    return time(NULL) + g_t0;
+    /* time_t 在 ESP-IDF v6 工具链中为 64 位, 32 位核上读写需互斥防撕裂 */
+    time_t t0;
+    xSemaphoreTake(s_out, portMAX_DELAY);
+    t0 = g_t0;
+    xSemaphoreGive(s_out);
+    return time(NULL) + t0;
 }
 
 /* 分钟(小数) -> "HH:MM", 四舍五入 */
@@ -83,7 +88,7 @@ static int json_num(const char *line, const char *key, double *out) {
     if (!p) return 0;
     p++;
     while (*p == ' ' || *p == '\t') p++;
-    return sscanf(p, "%lf", out) == 1;
+    return sscanf(p, "%lf", out) == 1 && isfinite(*out);
 }
 
 /* 一次性完整应答 */
@@ -196,13 +201,20 @@ static void nvs_save_cfg(const SolarCfg *c);
 static void cmd_task(void *arg) {
     char line[128];
     int n = 0;
+    int overflow = 0;
     uint8_t c;
     for (;;) {
         if (uart_read_bytes(UART_NUM_0, &c, 1, pdMS_TO_TICKS(5)) != 1) {
             continue; /* 超时, 已让出CPU */
         }
         if (c == '\n' || c == '\r') {
-            if (!n) continue;
+            if (!n) { overflow = 0; continue; }
+            if (overflow) { /* 行超长: 丢弃至换行, 防止截断命令被误解析 */
+                overflow = 0;
+                n = 0;
+                ESP_LOGW(TAG, "命令行超过%d字节, 已丢弃", (int)sizeof(line) - 1);
+                continue;
+            }
             line[n] = 0;
             n = 0;
             double ts, la, lo, tz;
@@ -246,27 +258,43 @@ static void cmd_task(void *arg) {
                 xSemaphoreGive(s_out);
             } else if (strstr(line, "\"cmd\"") && json_num(line, "\"lat\"", &la)
                        && json_num(line, "\"lon\"", &lo) && json_num(line, "\"tz\"", &tz)) {
-                if (!json_num(line, "\"ts\"", &ts)) ts = 0;
-                xSemaphoreTake(s_out, portMAX_DELAY); /* 防主循环读撕裂 */
-                g_cfg = (SolarCfg){la, lo, tz};
-                if (ts > 0) {
-                    g_t0 = (time_t)ts - time(NULL);
+                int is_init = strstr(line, "\"cmd\":\"init\"") != NULL;
+                int has_ts = json_num(line, "\"ts\"", &ts);
+                if (!has_ts) ts = 0;
+                SolarCfg cfg = {la, lo, tz};
+
+                if (is_init) {
+                    /* 只有 init 才允许更新运行态配置/时间基准; solar 一次性计算不得落状态 */
+                    xSemaphoreTake(s_out, portMAX_DELAY); /* 防主循环读撕裂 */
+                    g_cfg = cfg;
+                    if (has_ts) g_t0 = (time_t)ts - time(NULL);
+                    xSemaphoreGive(s_out);
 #if CONFIG_SOLAR_RTC
-                    if (s_rtc_ok) { /* 显式注入的时间同步进RTC, 保持时间源一致 */
+                    if (s_rtc_ok && has_ts) { /* 显式注入的时间同步进RTC, 保持时间源一致 */
                         struct tm *tm = gmtime(&(time_t){ts});
-                        ds3231_write(&(RtcTime){tm->tm_year + 1900, tm->tm_mon + 1,
-                                             tm->tm_mday, tm->tm_hour, tm->tm_min,
-                                             tm->tm_sec});
+                        if (tm) {
+                            ds3231_write(&(RtcTime){tm->tm_year + 1900, tm->tm_mon + 1,
+                                                 tm->tm_mday, tm->tm_hour, tm->tm_min,
+                                                 tm->tm_sec});
+                        }
                     }
 #endif
                 }
-                xSemaphoreGive(s_out);
-                solar_compute(&g_cfg, now_t(), &r);
-                send_json(&r);
-                if (strstr(line, "\"cmd\":\"init\"")) g_hb = 1;
+
+                if (is_init) {
+                    solar_compute(&cfg, now_t(), &r);
+                    send_json(&r);
+                    g_hb = 1;
+                } else {
+                    /* 一次性计算: 不更新 g_cfg/g_t0/RTC, 直接使用请求里的 ts */
+                    solar_compute(&cfg, has_ts ? (time_t)ts : now_t(), &r);
+                    send_json(&r);
+                }
             }
         } else if (n < (int)sizeof(line) - 1) {
             line[n++] = (char)c;
+        } else {
+            overflow = 1; /* 丢弃后续字节直到换行 */
         }
     }
     vTaskDelete(NULL);
@@ -277,10 +305,18 @@ static void cmd_task(void *arg) {
 static void pcas_send(const char *body) {
     char buf[96];
     int n = snprintf(buf, sizeof buf, "$%s", body);
+    if (n < 0 || n >= (int)sizeof buf) {
+        ESP_LOGW(TAG, "PCAS命令过长, 已丢弃: %s", body);
+        return;
+    }
     unsigned char cs = 0;
     for (int i = 1; i < n; i++) cs ^= (unsigned char)buf[i];
-    n += snprintf(buf + n, sizeof buf - n, "*%02X\r\n", cs);
-    uart_write_bytes(UART_NUM_1, buf, n);
+    int m = snprintf(buf + n, sizeof buf - n, "*%02X\r\n", cs);
+    if (m < 0 || m >= (int)(sizeof buf - n)) {
+        ESP_LOGW(TAG, "PCAS校验和写入截断: %s", body);
+        return;
+    }
+    uart_write_bytes(UART_NUM_1, buf, n + m);
 }
 
 /* GNSS数据链路: ATGM336H UART1, 只消费$GNRMC/$GNGGA; 定位防抖后等价于一次init */
@@ -307,6 +343,7 @@ static void gnss_task(void *arg) {
 
     char line[128];
     int n = 0;
+    int overflow = 0;
     int v_cnt = 0;    /* 未定位帧计数 */
     int sats = 0;     /* GGA可见卫星数 */
     GnssFix prev = {0}, fix;
@@ -314,26 +351,29 @@ static void gnss_task(void *arg) {
         uint8_t c;
         if (uart_read_bytes(UART_NUM_1, &c, 1, pdMS_TO_TICKS(10)) != 1) continue;
         if (c == '\n') {
-            if (!n) continue;
+            if (!n) { overflow = 0; continue; }
+            if (overflow) { overflow = 0; n = 0; continue; } /* 超长NMEA丢弃 */
             line[n] = 0;
             n = 0;
             int rc = gnss_parse_rmc(line, &fix);
             if (rc == -4) { /* 模块活着但未定位(V帧) */
                 v_cnt++;
-                /* 搜星状态JSON(1Hz, TUI显示搜星过程) + LCD搜星界面 */
-                xSemaphoreTake(s_out, portMAX_DELAY);
-                printf("{\"gnss\":\"search\",\"v\":%d,\"sats\":%d}\n", v_cnt, sats);
-                xSemaphoreGive(s_out);
+                /* 搜星状态仅在进入心跳前发送, 避免TUI在时钟/搜星画面间闪烁 */
+                if (!g_hb) {
+                    xSemaphoreTake(s_out, portMAX_DELAY);
+                    printf("{\"gnss\":\"search\",\"v\":%d,\"sats\":%d}\n", v_cnt, sats);
+                    xSemaphoreGive(s_out);
 #if CONFIG_SOLAR_LCD
-                if (!g_hb) lcd_render_search(v_cnt, sats); /* 心跳模式下不覆盖面板 */
+                    lcd_render_search(v_cnt, sats);
 #endif
+                }
                 continue;
             }
             if (rc == 0) {
                 /* 防抖: 连续两帧一致(坐标差<0.001°, 时间差<10s)才算fix */
                 int stable = prev.valid && fabs(fix.lat - prev.lat) < 0.001
                              && fabs(fix.lon - prev.lon) < 0.001
-                             && labs((long)(fix.ts - prev.ts)) < 10;
+                             && llabs((long long)(fix.ts - prev.ts)) < 10;
                 prev = fix;
                 if (stable) handle_fix(&fix);
                 continue;
@@ -345,6 +385,8 @@ static void gnss_task(void *arg) {
             /* 忽略 */
         } else if (n < (int)sizeof(line) - 1) {
             line[n++] = (char)c;
+        } else {
+            overflow = 1; /* 丢弃后续字节直到换行 */
         }
     }
     vTaskDelete(NULL);
@@ -354,30 +396,42 @@ static void gnss_task(void *arg) {
 /* GNSS fix 统一处理: 更新配置->(对时RTC)->重算->应答->心跳模式
  * (gnss_task 与 nmea 注入命令共用, 保证测试与真实链路一致) */
 static void handle_fix(const GnssFix *fix) {
-    xSemaphoreTake(s_out, portMAX_DELAY); /* 防主循环读撕裂 */
-    g_cfg = (SolarCfg){fix->lat, fix->lon, CONFIG_SOLAR_GNSS_TZ};
+    if (!fix->valid) return;
+    if (fix->lat < -90.0 || fix->lat > 90.0 || fix->lon < -180.0 || fix->lon > 180.0) {
+        ESP_LOGW(TAG, "GNSS FIX 坐标越界, 忽略: %.6f %.6f", fix->lat, fix->lon);
+        return;
+    }
+
+    SolarCfg cfg;
+    xSemaphoreTake(s_out, portMAX_DELAY); /* 防主循环读撕裂 + 64位g_t0互斥 */
+    cfg = (SolarCfg){fix->lat, fix->lon, CONFIG_SOLAR_GNSS_TZ};
+    g_cfg = cfg;
+    g_t0 = fix->ts - time(NULL);
     xSemaphoreGive(s_out);
+
 #if CONFIG_SOLAR_RTC
     if (s_rtc_ok) {
         struct tm *tm = gmtime(&fix->ts);
-        ds3231_write(&(RtcTime){tm->tm_year + 1900, tm->tm_mon + 1,
-                             tm->tm_mday, tm->tm_hour, tm->tm_min, tm->tm_sec});
-        ESP_LOGI(TAG, "GNSS FIX -> RTC 对时");
+        if (tm) {
+            ds3231_write(&(RtcTime){tm->tm_year + 1900, tm->tm_mon + 1,
+                                 tm->tm_mday, tm->tm_hour, tm->tm_min, tm->tm_sec});
+            ESP_LOGI(TAG, "GNSS FIX -> RTC 对时");
+        }
     }
 #endif
-    g_t0 = fix->ts - time(NULL);
+
     SolarResult r;
-    solar_compute(&g_cfg, now_t(), &r);
+    solar_compute(&cfg, now_t(), &r);
     send_json(&r);
     g_hb = 1;
     ESP_LOGI(TAG, "GNSS FIX %.6f %.6f ts=%lld -> 心跳模式",
-             g_cfg.lat, g_cfg.lon, (long long)fix->ts);
+             cfg.lat, cfg.lon, (long long)fix->ts);
     /* 坐标移动才写NVS(防flash磨损): 与上次fix差>0.001° */
     static double s_last_lat = 1e9, s_last_lon;
-    if (fabs(g_cfg.lat - s_last_lat) > 0.001 || fabs(g_cfg.lon - s_last_lon) > 0.001) {
-        s_last_lat = g_cfg.lat;
-        s_last_lon = g_cfg.lon;
-        nvs_save_cfg(&g_cfg);
+    if (fabs(cfg.lat - s_last_lat) > 0.001 || fabs(cfg.lon - s_last_lon) > 0.001) {
+        s_last_lat = cfg.lat;
+        s_last_lon = cfg.lon;
+        nvs_save_cfg(&cfg);
         ESP_LOGI(TAG, "坐标已存NVS");
     }
 }

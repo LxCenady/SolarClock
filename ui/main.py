@@ -2,7 +2,8 @@
 """solarclock: SolarTime TUI 入口
 
 用法:
-  solarclock               连接ESP32, 用本地缓存配置(无则ESP32默认)
+  solarclock               连接ESP32, 默认GNSS监听模式(等硬件定位)
+  solarclock --use-cache   使用 ~/.solarclock.json 缓存坐标注入
   solarclock -c            交互配置: 坐标/时区/当地时间, 记忆供下次使用
   solarclock -r            随机生成陆地经纬度+时区并注入
   solarclock -L 31.2 -O 121.5 -T 8 [--ts 1734782400]   指定坐标/时间戳(测试用)
@@ -120,6 +121,8 @@ def _show_hint():
 def main():
     ap = argparse.ArgumentParser(description="SolarTime TUI")
     ap.add_argument("--port", default=PORT)
+    ap.add_argument("--use-cache", action="store_true",
+                    help="使用 ~/.solarclock.json 缓存坐标/时间偏移注入")
     ap.add_argument("-r", action="store_true", help="随机生成经纬度+时区")
     ap.add_argument("--local", action="store_true",
                     help="PC本地网络定位(IP)获取GPS, 打包JSON提交ESP32")
@@ -135,8 +138,16 @@ def main():
 
     delta_h = 0.0
     gnss_mode = False
-    # ---- 坐标来源: -r > --local > -L/-O/-T > (默认GNSS监听模式) ----
-    if args.r:
+    # ---- 坐标来源: --use-cache > -r > --local > -L/-O/-T > (默认GNSS监听模式) ----
+    if args.use_cache:
+        cache = _load_cache()
+        if cache is None:
+            print("[error] 没有缓存配置, 请先运行 solarclock -c 或使用 -r/-L 指定")
+            return 1
+        lat, lon, tz = cache["lat"], cache["lon"], cache["tz"]
+        delta_h = cache.get("delta_h", 0.0)
+        print(f"[cache] lat={lat} lon={lon} tz={tz} delta_h={delta_h:+.1f}h")
+    elif args.r:
         lat, lon, tz = _rand_point()
         print(f"[random] lat={lat} lon={lon} tz={tz}")
     elif args.local:
@@ -166,6 +177,11 @@ def main():
                 except Exception as e:
                     print(f"[error] 无法打开 {args.port}: {e}")
                     return 1
+                time.sleep(2.0)  # 打开串口会触发ESP32复位, 必须等启动完成
+                try:
+                    link.ser.reset_input_buffer()
+                except Exception:
+                    pass
                 state = ST_LIVE if gnss_mode else ST_INIT
                 if gnss_mode:
                     sys.stdout.write(clear_screen() + "\x1b[?25l")

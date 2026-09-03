@@ -23,6 +23,12 @@ CASES = [
      0, 0, -1, -2),  # 校验和错
     ("$GNRMC,0848,A,2236.9453,N,11408.4790,E,0.53,292.44,141216,,,A*00",
      0, 0, -1, -2),  # 校验和错(截断)
+    ("$GNRMC,084852.000,A,2236.9453,,11408.4790,E,0.53,292.44,141216,,,A*3B",
+     0, 0, -1, -7),  # 半球字段空
+    ("$GNRMC,084852.000,A,9999.0000,N,11408.4790,E,0.53,292.44,141216,,,A*7B",
+     0, 0, -1, -7),  # 纬度越界
+    ("$GNRMC,236061.000,A,2236.9453,N,11408.4790,E,0.53,292.44,141216,,,A*76",
+     0, 0, -1, -7),  # 时间域值非法
 ]
 
 
@@ -48,20 +54,31 @@ def py_parse(line):
         return -5, None
     t = float(f[1])
     hh, mm, ss = int(t // 10000), int(t // 100) % 100, int(t) % 100
+    if hh > 23 or mm > 59 or ss > 59:
+        return -7, None
+    if f[4] not in ("N", "S") or f[6] not in ("E", "W"):
+        return -7, None
     lat = int(float(f[3]) / 100) + (float(f[3]) - int(float(f[3]) / 100) * 100) / 60
     lon = int(float(f[5]) / 100) + (float(f[5]) - int(float(f[5]) / 100) * 100) / 60
     if f[4] == "S":
         lat = -lat
     if f[6] == "W":
         lon = -lon
+    if lat < -90.0 or lat > 90.0 or lon < -180.0 or lon > 180.0:
+        return -7, None
+    dd = int(f[9]) // 10000
+    mo = int(f[9]) // 100 % 100
     yy = int(f[9]) % 100
+    if mo < 1 or mo > 12 or dd < 1 or dd > 31:
+        return -7, None
     year = 1900 + yy if yy >= 70 else 2000 + yy
-    ts = int(datetime.datetime(year, int(f[9]) // 100 % 100, int(f[9]) // 10000,
-                               hh, mm, ss, tzinfo=datetime.timezone.utc).timestamp())
+    ts = int(datetime.datetime(year, mo, dd, hh, mm, ss,
+                               tzinfo=datetime.timezone.utc).timestamp())
     return 0, {"lat": round(lat, 9), "lon": round(lon, 9), "ts": ts}
 
 
 def build_c():
+    os.makedirs("/tmp/opencode", exist_ok=True)
     harness = r"""
 #include <stdio.h>
 #include "gnss.h"

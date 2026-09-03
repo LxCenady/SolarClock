@@ -64,13 +64,20 @@ int gnss_parse_rmc(const char *line, GnssFix *f) {
 
     double t = atof(fld[1]);
     int hh = (int)(t / 10000.0), mm = (int)(t / 100.0) % 100, ss = (int)t % 100;
+    if (hh > 23 || mm > 59 || ss > 59) return -7; /* 时间域值非法 */
+
+    /* 半球必须显式给出, 空字段不得默认北纬/东经 */
+    if (fld[4][0] != 'N' && fld[4][0] != 'S') return -7;
+    if (fld[6][0] != 'E' && fld[6][0] != 'W') return -7;
 
     double lat = ddmm2dec(atof(fld[3]));
     if (fld[4][0] == 'S') lat = -lat;
     double lon = ddmm2dec(atof(fld[5]));
     if (fld[6][0] == 'W') lon = -lon;
+    if (lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0) return -7; /* 坐标越界 */
 
     int dd = atoi(fld[9]) / 10000, mo = atoi(fld[9]) / 100 % 100, yy = atoi(fld[9]) % 100;
+    if (mo < 1 || mo > 12 || dd < 1 || dd > 31) return -7; /* 日期域值非法 */
     int year = (yy >= 70) ? 1900 + yy : 2000 + yy;  /* 两位年世纪推断 */
 
     f->lat = lat;

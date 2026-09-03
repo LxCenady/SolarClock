@@ -13,7 +13,8 @@ typedef struct {
 } GnssFix;
 
 /* 解析一行NMEA($GNRMC/$GPRMC)
- * 返回 0=有效fix, 负数=无效(原因): -1非RMC -2校验和错 -3字段不足 -4状态非A -5时间/日期缺 */
+ * 返回 0=有效fix, 负数=无效(原因): -1非RMC -2校验和错 -3字段不足 -4状态非A
+ *       -5时间/日期缺 -6经纬度空/非数字 -7半球/坐标/时间日期域值非法 */
 int gnss_parse_rmc(const char *line, GnssFix *f);
 
 /* 解析GGA的定位质量与卫星数(诊断用): 返回0=成功, *sats=可见卫星数 */

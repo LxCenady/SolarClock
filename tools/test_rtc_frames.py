@@ -50,6 +50,7 @@ CASES = [
 
 
 def build():
+    os.makedirs("/tmp/opencode", exist_ok=True)
     with open("/tmp/opencode/rtc_test.c", "w") as fp:
         fp.write(HARNESS)
     r = subprocess.run(["gcc", "-O2", "-I", ROOT, "-o", "/tmp/opencode/rtc_test",

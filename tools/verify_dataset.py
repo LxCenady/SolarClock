@@ -72,6 +72,8 @@ def run_case(ser, case):
     if r.get("rise") == "--":
         if not polar:
             fails.append("firmware极区但参考非极区")
+        elif r.get("polar") != polar:
+            fails.append(f"极区: got {r.get('polar')} exp {polar}")
         return (len(fails) == 0), "; ".join(fails) if fails else "OK"
     if polar:
         if r.get("polar") != polar:
