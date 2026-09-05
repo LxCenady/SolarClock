@@ -352,6 +352,7 @@ int core_compute_hb(CloudHb *hb) {
                        * 180.0 / M_PI + 180.0;
         if (azDeg >= 360.0) azDeg -= 360.0;
         hb->alt = (int)(altDeg + (altDeg >= 0 ? 0.5 : -0.5));
+        if (hb->alt < 0) hb->alt = 0; /* 日落后高度角归0(UI固定最低点) */
         hb->az = (int)(azDeg + 0.5) % 360;
     }
 
