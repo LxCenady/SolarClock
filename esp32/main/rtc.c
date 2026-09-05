@@ -1,5 +1,5 @@
-/* DS3231 RTC 占位驱动 (I2C0, 0x68)
- * 物理接入见 GNSS_RTC_PROTOCOL.md: SCL=GPIO9 SDA=GPIO8, 4.7kΩ上拉
+/* DS3231 RTC 驱动 (I2C0, 0x68)
+ * 物理接入: SCL=GPIO9 SDA=GPIO8 (4.7kΩ上拉, I2C0 0x68)
  * 寄存器: 00h-06h时间(BCD), 0Eh控制, 0Fh状态(OSF), 11h-12h温度 */
 #include "rtc.h"
 

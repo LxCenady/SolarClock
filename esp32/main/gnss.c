@@ -1,5 +1,5 @@
-/* GNSS 数据链路: ATGM336H 占位驱动(纯解析逻辑, 无硬件依赖, 可PC单测)
- * 物理接入见 GNSS_RTC_PROTOCOL.md: UART1 115200 8N1, 只消费 $GNRMC */
+/* GNSS 数据链路: ATGM336H 驱动(纯解析逻辑, 无硬件依赖, 可PC单测)
+ * 物理接入: UART1(见Kconfig) 只消费 $GNRMC/$GNGGA; 波特率默认9600(5N) */
 #include "gnss.h"
 
 #include <stdio.h>
