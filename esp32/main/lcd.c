@@ -248,7 +248,7 @@ void lcd_render_search(int v_frames, int sats) {
  * 高度刻度: 0-90° 15°间隔, 绿线, 黄三角指示(日落后固定最低点)
  * 罗盘: N/S/E/W 圆周刻度(r=40), 中心直线段指向az
  * 数字 ALT/AZ 由调用方画在图形正上方 */
-static void lcd_render_sun_graphics(int alt, int az) {
+static void lcd_render_sun_graphics(int alt, int az, int hide_ptr) {
     uint16_t K = rgb565(0, 0, 0);
     uint16_t GRN = rgb565(0, 255, 0), YEL = rgb565(255, 255, 0);
     uint16_t W = rgb565(255, 255, 255), DIM = rgb565(128, 128, 128);
@@ -281,11 +281,13 @@ static void lcd_render_sun_graphics(int alt, int az) {
     gfx_text(cx - 3, cy + R + 2, "S", W);
     gfx_text(cx - R - 8, cy - 3, "W", W);
     gfx_text(cx + R + 2, cy - 3, "E", W);
-    double rad = az * 3.14159265358979 / 180.0;
-    int x2 = cx + (int)((R - 4) * sin(rad));
-    int y2 = cy - (int)((R - 4) * cos(rad));
-    gfx_line(cx, cy, x2, y2, YEL);
-    gfx_px(cx, cy, YEL);
+    if (!hide_ptr) { /* 夜晚/极夜隐藏指针(太阳在地平线下) */
+        double rad = az * 3.14159265358979 / 180.0;
+        int x2 = cx + (int)((R - 4) * sin(rad));
+        int y2 = cy - (int)((R - 4) * cos(rad));
+        gfx_line(cx, cy, x2, y2, YEL);
+        gfx_px(cx, cy, YEL);
+    }
 }
 
 void lcd_render_hb(const char *hb_json) {
@@ -336,12 +338,15 @@ void lcd_render_hb(const char *hb_json) {
         snprintf(line, sizeof line, "R %s  S %s", r, st);
         lcd_line(2, line, FG, BG);
     }
-    /* 字节4+5共用脏标志(先算后更新, 否则块5恒false) */
-    int az_alt_dirty = strcmp(alt, c_alt) || strcmp(az, c_az);
-    if (az_alt_dirty) { strcpy(c_alt, alt); strcpy(c_az, az);
-        snprintf(line, sizeof line, "ALT %s   AZ %s", alt, az);
+    /* 块4+5共用脏标志(先算后更新, 否则块5恒false)
+     * 夜晚(ne==1)/极夜(ne==3): az显示"--", 罗盘指针隐藏(太阳在地平线下) */
+    int night = (ne[0] == '1' || ne[0] == '3');
+    const char *az_disp = night ? "--" : az;
+    int az_alt_dirty = strcmp(alt, c_alt) || strcmp(az_disp, c_az);
+    if (az_alt_dirty) { strcpy(c_alt, alt); strcpy(c_az, az_disp);
+        snprintf(line, sizeof line, "ALT %s   AZ %s", alt, az_disp);
         lcd_line(3, line, YEL, BG);
-        lcd_render_sun_graphics(atoi(alt), atoi(az));
+        lcd_render_sun_graphics(atoi(alt), atoi(az), night);
         gfx_blit(66);
     }
     /* 块6: 进度条+%+事件 - dp/ne/tne变刷 */
