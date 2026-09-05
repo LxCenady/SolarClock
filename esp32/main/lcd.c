@@ -224,6 +224,8 @@ void lcd_render_hb(const char *hb_json) {
     json_get(hb_json, "\"ne\"", ne, sizeof ne);
     json_get(hb_json, "\"tne\"", tne, sizeof tne);
     json_get(hb_json, "\"dp\"", dp, sizeof dp);
+    char syn[16];
+    json_get(hb_json, "\"syn\"", syn, sizeof syn);
 
     char line[64];
     /* 行0: 日期 时间 */
@@ -249,7 +251,20 @@ void lcd_render_hb(const char *hb_json) {
     else if (ne[0] == '3') ne_txt = "POLAR NIGHT";
     snprintf(line, sizeof line, "%s%%  %s %sm", dp, ne_txt, tne);
     lcd_line(5, line, FG, BG);
-    /* 行6: 空行(预留事件区) */
-    lcd_fill(0, LINE_Y(6), LCD_H_RES, FONT_STEP, BG);
+    /* 行6: 同步状态 */
+    long sv = atol(syn);
+    char syncbuf[24];
+    const char *sy;
+    uint16_t syc = DIM;
+    if (sv == -1) { sy = "SYNCING"; syc = rgb565(255, 255, 0); }
+    else if (sv == -2) { sy = "NO SYNC"; syc = rgb565(255, 80, 0); }
+    else {
+        if (sv >= 3600) snprintf(syncbuf, sizeof syncbuf, "SYNCED %ldh AGO", sv / 3600);
+        else if (sv >= 60) snprintf(syncbuf, sizeof syncbuf, "SYNCED %ldm AGO", sv / 60);
+        else snprintf(syncbuf, sizeof syncbuf, "SYNCED %lds AGO", sv);
+        sy = syncbuf;
+        syc = ACCENT;
+    }
+    lcd_line(6, sy, syc, BG);
     xSemaphoreGive(s_lcd_mutex);
 }

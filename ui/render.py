@@ -80,6 +80,18 @@ def render(hb):
     la, lo = hb.get("la", 0), hb.get("lo", 0)
     loc = f"{abs(la):.4f}{'N' if la >= 0 else 'S'} {abs(lo):.4f}{'E' if lo >= 0 else 'W'}"
 
+    syn = hb.get("syn", -2)
+    if syn == -1:
+        syn_txt = "SYNCING"
+    elif syn == -2:
+        syn_txt = "NO SYNC"
+    elif syn >= 3600:
+        syn_txt = f"SYNCED {syn // 3600}h AGO"
+    elif syn >= 60:
+        syn_txt = f"SYNCED {syn // 60}m AGO"
+    else:
+        syn_txt = f"SYNCED {syn}s AGO"
+
     lines = [
         f" SolarClock  {d}  {w}",
         f" Solar time  {s}",
@@ -89,5 +101,6 @@ def render(hb):
         f" Daylight    {_bar(dp)} {dp:3d}%",
         f" Next event  {nxt}",
         f" Event       {event}",
+        f" Sync        {syn_txt}",
     ]
     return "\x1b[H" + "\n".join(lines) + "\n\x1b[?25l"
