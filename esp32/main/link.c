@@ -132,10 +132,10 @@ void link_send_hb(const CloudHb *hb, char *out, int out_n) {
     int n = snprintf(out, out_n,
              "{\"t\":\"%s\",\"d\":\"%s\",\"s\":\"%s\",\"r\":\"%s\",\"st\":\"%s\","
              "\"ne\":%d,\"tne\":%d,\"dp\":%d,\"ev\":%d,\"p\":%d,"
-             "\"la\":%.4f,\"lo\":%.4f,\"syn\":%ld}",
+             "\"alt\":%d,\"az\":%d,\"la\":%.4f,\"lo\":%.4f,\"syn\":%ld}",
              hb->t, hb->d, hb->s, hb->r, hb->st,
              hb->ne, hb->tne, hb->dp, hb->ev, hb->p,
-             hb->la, hb->lo, hb->syn);
+             hb->alt, hb->az, hb->la, hb->lo, hb->syn);
     printf("%s\n", out);
     core_unlock();
     (void)n;

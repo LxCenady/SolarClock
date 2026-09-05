@@ -214,6 +214,7 @@ void lcd_render_hb(const char *hb_json) {
     uint16_t FG = rgb565(255, 255, 255), BG = rgb565(0, 0, 0);
     uint16_t ACCENT = rgb565(0, 255, 0), DIM = rgb565(128, 128, 128);
     char t[9], d[6], s[6], r[6], st[6], la[10], lo[10], ne[4], tne[8], dp[4];
+    char syn[16];
     json_get(hb_json, "\"t\"", t, sizeof t);
     json_get(hb_json, "\"d\"", d, sizeof d);
     json_get(hb_json, "\"s\"", s, sizeof s);
@@ -224,8 +225,10 @@ void lcd_render_hb(const char *hb_json) {
     json_get(hb_json, "\"ne\"", ne, sizeof ne);
     json_get(hb_json, "\"tne\"", tne, sizeof tne);
     json_get(hb_json, "\"dp\"", dp, sizeof dp);
-    char syn[16];
     json_get(hb_json, "\"syn\"", syn, sizeof syn);
+    char alt[8], az[8];
+    json_get(hb_json, "\"alt\"", alt, sizeof alt);
+    json_get(hb_json, "\"az\"", az, sizeof az);
 
     char line[64];
     /* 行0: 日期 时间 */
@@ -234,13 +237,12 @@ void lcd_render_hb(const char *hb_json) {
     /* 行1: 太阳时 */
     snprintf(line, sizeof line, "SOLAR %s", s);
     lcd_line(1, line, ACCENT, BG);
-    /* 行2: 坐标(截断至18字符内) */
-    snprintf(line, sizeof line, "%s %s", la, lo);
-    line[18] = 0;
-    lcd_line(2, line, DIM, BG);
-    /* 行3: 日出日落 */
+    /* 行2: 日出日落 */
     snprintf(line, sizeof line, "R %s  S %s", r, st);
-    lcd_line(3, line, FG, BG);
+    lcd_line(2, line, FG, BG);
+    /* 行3: 太阳高度角/方位角 */
+    snprintf(line, sizeof line, "SUN ALT %s  AZ %s", alt, az);
+    lcd_line(3, line, rgb565(255, 255, 0), BG);
     /* 行4: 进度条 */
     int pct = atoi(dp);
     lcd_progress_bar(4, pct, ACCENT, BG);
@@ -266,5 +268,10 @@ void lcd_render_hb(const char *hb_json) {
         syc = ACCENT;
     }
     lcd_line(6, sy, syc, BG);
+    /* 行7: 坐标(同步状态下面一行) */
+    char locbuf[20];
+    snprintf(locbuf, sizeof locbuf, "%s %s", la, lo);
+    locbuf[18] = 0;
+    lcd_line(7, locbuf, DIM, BG);
     xSemaphoreGive(s_lcd_mutex);
 }

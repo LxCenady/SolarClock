@@ -95,12 +95,13 @@ def render(hb):
     lines = [
         f" SolarClock  {d}  {w}",
         f" Solar time  {s}",
-        f" Location    {loc}",
         f" Sunrise     {rise}",
         f" Sunset      {set_}",
+        f" Sun         ALT {hb.get('alt', 0)}°  AZ {hb.get('az', 0)}°",
         f" Daylight    {_bar(dp)} {dp:3d}%",
         f" Next event  {nxt}",
         f" Event       {event}",
         f" Sync        {syn_txt}",
+        f" Location    {loc}",
     ]
     return "\x1b[H" + "\n".join(lines) + "\n\x1b[?25l"

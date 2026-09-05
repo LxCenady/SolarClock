@@ -45,6 +45,7 @@ static time_t s_last_sync = 0;
 
 static const char *TAG = "core";
 #define HB_MS 100
+#define D2R_LOCAL 0.017453292519943295
 
 /* ---- 锁 ---- */
 void core_lock(void) { xSemaphoreTake(s_out, portMAX_DELAY); }
@@ -338,6 +339,23 @@ int core_compute_hb(CloudHb *hb) {
     time_t lt = now + (time_t)(cfg.tz * 3600.0);
     struct tm *tm = gmtime(&lt);
     int cur_s = (lt % 86400 + 86400) % 86400;
+
+    /* 太阳高度角/方位角 (NOAA):
+     *   真太阳时 = r.solar_min 分钟; 时角 H = (真太阳时-720)*0.25 度
+     *   高度 alt = asin(sin(lat)·sin(decl)+cos(lat)·cos(decl)·cos(H))
+     *   方位 az = atan2(sin(H), cos(H)·sin(lat)-tan(decl)·cos(lat))  北=0 东=90 南=180 西=270 */
+    {
+        double H = (r.solar_min - 720.0) / 4.0;
+        double latR = cfg.lat * D2R_LOCAL, declR = r.decl * D2R_LOCAL, HR = H * D2R_LOCAL;
+        double altDeg = asin(sin(latR) * sin(declR)
+                             + cos(latR) * cos(declR) * cos(HR)) * 180.0 / M_PI;
+        /* NOAA方位角变体输出"南为0", 转北=0标准: +180 */
+        double azDeg = atan2(sin(HR), cos(HR) * sin(latR) - tan(declR) * cos(latR))
+                       * 180.0 / M_PI + 180.0;
+        if (azDeg >= 360.0) azDeg -= 360.0;
+        hb->alt = (int)(altDeg + (altDeg >= 0 ? 0.5 : -0.5));
+        hb->az = (int)(azDeg + 0.5) % 360;
+    }
 
     int dp;
     if (polar == 1) dp = 100;
