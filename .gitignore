@@ -8,3 +8,7 @@ __pycache__/
 # Agent档案只读, 永不推送
 FOR_AGENTS_READ_ONLY_DONNOT_PUSH.md
 AUDIT_TECHNICAL_DOC.md
+
+# 本地测试工具(不入库, optional)
+tools/
+ui/__pycache__/
