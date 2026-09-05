@@ -7,7 +7,6 @@
 #include "core.h"
 #include "view.h"
 
-#define HB_MS 100
 
 void app_main(void) {
     /* UART0驱动 (Link层命令收发与JSON输出的前提) */
@@ -28,13 +27,13 @@ void app_main(void) {
             CloudHb hb;
             if (core_compute_hb(&hb) == 0) {
                 char j[256];
-                link_send_hb(&hb, j, sizeof j);  /* 序列化+串口发送 */
-                if (tn != last_tick || 1)
-                    view_render_hb(j);           /* 100ms或视层节流? 交给层内 */
+                link_send_hb(&hb, j, sizeof j);  /* 序列化+串口发送(100ms) */
+                view_render_hb(j);               /* 喂给view缓存 */
             }
         } else {
             view_render_search();     /* 未进心跳: 搜星界面 */
         }
-        vTaskDelay(pdMS_TO_TICKS(HB_MS));
+        view_poll();                  /* 20Hz判定(50ms): lcd分块脏检查 */
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }

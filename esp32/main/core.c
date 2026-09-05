@@ -44,7 +44,6 @@ static time_t s_win_start = 0;
 static time_t s_last_sync = 0;
 
 static const char *TAG = "core";
-#define HB_MS 100
 #define D2R_LOCAL 0.017453292519943295
 
 /* ---- 锁 ---- */
@@ -323,7 +322,6 @@ void core_tick(void) {
         s_syncing = 1;
         ESP_LOGI(TAG, "距上次同步>6h, 开搜星窗口(%ds)", SYNC_WIN_S);
     }
-    (void)HB_MS;
 }
 
 /* ---- 心跳快照计算 ---- */

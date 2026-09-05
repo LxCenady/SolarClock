@@ -6,6 +6,7 @@
  */
 #include "lcd.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -19,6 +20,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "lcd_font.h"
 
 #define LCD_HOST SPI2_HOST
 
@@ -55,10 +57,52 @@
 static const char *TAG = "lcd";
 static esp_lcd_panel_handle_t s_panel = NULL;
 static uint16_t *s_buf = NULL;
+static uint16_t *g_gfx = NULL;   /* 图形区帧缓冲: 高度刻度+罗盘 */
+#define GFX_H 90
+#define GFX_W LCD_H_RES
+
+/* ---- 图形原语(写局部帧缓冲 g_gfx, 整块后blit) ---- */
+static void gfx_clear(uint16_t c) {
+    for (int i = 0; i < GFX_W * GFX_H; i++) g_gfx[i] = c;
+}
+static void gfx_px(int x, int y, uint16_t c) {
+    if (x >= 0 && x < GFX_W && y >= 0 && y < GFX_H) g_gfx[y * GFX_W + x] = c;
+}
+static void gfx_line(int x0, int y0, int x1, int y1, uint16_t c) {
+    int dx = x1 - x0, dy = y1 - y0;
+    int steps = (abs(dx) > abs(dy) ? abs(dx) : abs(dy)) + 1;
+    for (int i = 0; i <= steps; i++) {
+        gfx_px(x0 + dx * i / steps, y0 + dy * i / steps, c);
+    }
+}
+static void gfx_circle(int cx, int cy, int r, uint16_t c) {
+    int x0 = cx - r, x1 = cx + r;
+    for (int x = x0; x <= x1; x++) {
+        int dx = x - cx;
+        int dy = (int)sqrt((double)(r * r - dx * dx));
+        gfx_px(x, cy - dy, c);
+        gfx_px(x, cy + dy, c);
+    }
+}
+static void gfx_char(int x, int y, char ch, uint16_t c) { /* 1x1 5x7字体 */
+    const uint8_t *glyph = font5x7[(unsigned char)ch - 32];
+    for (int row = 0; row < 7; row++)
+        for (int col = 0; col < 5; col++)
+            if ((glyph[row] >> (4 - col)) & 1) gfx_px(x + col, y + row, c);
+}
+static void gfx_text(int x, int y, const char *s, uint16_t c) {
+    while (*s) { gfx_char(x, y, *s++, c); x += 6; }
+}
+/* 整块blit到LCD */
+static void gfx_blit(int y0) {
+    for (int yy = 0; yy < GFX_H; yy++) {
+        esp_lcd_panel_draw_bitmap(s_panel, 0, y0 + yy, GFX_W, y0 + yy + 1,
+                                  g_gfx + yy * GFX_W);
+    }
+}
 static SemaphoreHandle_t s_lcd_mutex = NULL;
 
 /* ---- 极简5x7 ASCII字体(0x20-0x7E) ---- */
-#include "lcd_font.h"
 
 static uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b) {
     /* ST7789 SPI需要字节序交换(高字节先发) */
@@ -153,6 +197,8 @@ int lcd_init(void) {
 
     s_buf = heap_caps_malloc(LCD_H_RES * 2, MALLOC_CAP_DMA);
     if (!s_buf) return -1;
+    g_gfx = heap_caps_malloc(GFX_W * GFX_H * 2, MALLOC_CAP_8BIT);
+    if (!g_gfx) return -1;
 
     s_lcd_mutex = xSemaphoreCreateMutex();
     if (!s_lcd_mutex) return -1;
@@ -160,15 +206,6 @@ int lcd_init(void) {
     lcd_fill(0, 0, LCD_H_RES, LCD_V_RES, rgb565(0, 0, 0)); /* 清黑屏 */
     ESP_LOGI(TAG, "ST7789 240x240 initialized");
     return 0;
-}
-
-/* 简易进度条: 16字符宽(=192px, 不出界), 返回pct文本行由调用者处理 */
-static void lcd_progress_bar(int line, int pct, uint16_t fg, uint16_t bg) {
-    char s[17];
-    int filled = pct * 16 / 100;
-    for (int i = 0; i < 16; i++) s[i] = i < filled ? '#' : '-';
-    s[16] = 0;
-    lcd_line(line, s, fg, bg);
 }
 
 /* 从心跳JSON提取字段(简化: 直接字符串搜索, 心跳格式固定) */
@@ -207,14 +244,60 @@ void lcd_render_search(int v_frames, int sats) {
     xSemaphoreGive(s_lcd_mutex);
 }
 
+/* ========== 太阳360°显示: 左侧高度刻度 + 右侧罗盘 (90px) ==========
+ * 高度刻度: 0-90° 15°间隔, 绿线, 黄三角指示(日落后固定最低点)
+ * 罗盘: N/S/E/W 圆周刻度(r=40), 中心直线段指向az
+ * 数字 ALT/AZ 由调用方画在图形正上方 */
+static void lcd_render_sun_graphics(int alt, int az) {
+    uint16_t K = rgb565(0, 0, 0);
+    uint16_t GRN = rgb565(0, 255, 0), YEL = rgb565(255, 255, 0);
+    uint16_t W = rgb565(255, 255, 255), DIM = rgb565(128, 128, 128);
+
+    gfx_clear(K);
+
+    /* --- 左侧高度刻度: 映射 0(86px)->90(4px) --- */
+    int xL = 20, yTop = 4, yBot = 86;
+    gfx_line(xL, yTop, xL, yBot, DIM);
+    for (int d = 0; d <= 90; d += 15) {
+        int y = yBot - d * (yBot - yTop) / 90.0f;
+        gfx_line(xL - 3, y, xL + 3, y, W);
+        char s[4];
+        snprintf(s, sizeof s, "%d", d);
+        gfx_text(xL - 12, y - 3, s, DIM);
+    }
+    /* 绿色填充 0°→当前高度; 日落后固定最低点 */
+    int altC = alt < 0 ? 0 : (alt > 90 ? 90 : alt);
+    int yA = yBot - altC * (yBot - yTop) / 90.0f;
+    gfx_line(xL + 1, yBot, xL + 1, yA, GRN);
+    /* 黄色三角指示 */
+    gfx_line(xL - 4, yA, xL + 6, yA, YEL);
+    gfx_line(xL - 4, yA, xL + 1, yA - 3, YEL);
+    gfx_line(xL - 4, yA, xL + 1, yA + 3, YEL);
+
+    /* --- 右侧罗盘: 圆心(r=34, 图区90px内放下圆+NSWE), NSWE贴圆外缘 --- */
+    int cx = 140, cy = 45, R = 34;
+    gfx_circle(cx, cy, R, DIM);
+    gfx_text(cx - 3, cy - R - 8, "N", W);   /* 贴圆上缘 */
+    gfx_text(cx - 3, cy + R + 2, "S", W);
+    gfx_text(cx - R - 8, cy - 3, "W", W);
+    gfx_text(cx + R + 2, cy - 3, "E", W);
+    double rad = az * 3.14159265358979 / 180.0;
+    int x2 = cx + (int)((R - 4) * sin(rad));
+    int y2 = cy - (int)((R - 4) * cos(rad));
+    gfx_line(cx, cy, x2, y2, YEL);
+    gfx_px(cx, cy, YEL);
+}
+
 void lcd_render_hb(const char *hb_json) {
     if (!s_panel || !s_buf || !s_lcd_mutex) return;
     xSemaphoreTake(s_lcd_mutex, portMAX_DELAY);
-    /* 颜色一律经 rgb565() 保证字节序正确 */
     uint16_t FG = rgb565(255, 255, 255), BG = rgb565(0, 0, 0);
     uint16_t ACCENT = rgb565(0, 255, 0), DIM = rgb565(128, 128, 128);
+    uint16_t ORG = rgb565(255, 128, 0), YEL = rgb565(255, 255, 0);
+
+    /* 解析全部字段 */
     char t[9], d[6], s[6], r[6], st[6], la[10], lo[10], ne[4], tne[8], dp[4];
-    char syn[16];
+    char syn[16], alt[8], az[8];
     json_get(hb_json, "\"t\"", t, sizeof t);
     json_get(hb_json, "\"d\"", d, sizeof d);
     json_get(hb_json, "\"s\"", s, sizeof s);
@@ -226,52 +309,81 @@ void lcd_render_hb(const char *hb_json) {
     json_get(hb_json, "\"tne\"", tne, sizeof tne);
     json_get(hb_json, "\"dp\"", dp, sizeof dp);
     json_get(hb_json, "\"syn\"", syn, sizeof syn);
-    char alt[8], az[8];
     json_get(hb_json, "\"alt\"", alt, sizeof alt);
     json_get(hb_json, "\"az\"", az, sizeof az);
 
+    /* 静态缓存(跨帧比较) */
+    static char c_t[9]="", c_d[6]="", c_s[6]="", c_r[6]="", c_st[6]="", c_ne[4]="";
+    static char c_tne[8]="", c_dp[4]="", c_syn[16]="", c_alt[8]="", c_az[8]="", c_loc[20]="";
     char line[64];
-    /* 行0: 日期 时间 */
-    snprintf(line, sizeof line, "%s %s", d, t);
-    lcd_line(0, line, FG, BG);
-    /* 行1: 太阳时 */
-    snprintf(line, sizeof line, "SOLAR %s", s);
-    lcd_line(1, line, ACCENT, BG);
-    /* 行2: 日出日落 */
-    snprintf(line, sizeof line, "R %s  S %s", r, st);
-    lcd_line(2, line, FG, BG);
-    /* 行3: 太阳高度角/方位角 */
-    snprintf(line, sizeof line, "SUN ALT %s  AZ %s", alt, az);
-    lcd_line(3, line, rgb565(255, 255, 0), BG);
-    /* 行4: 进度条 */
-    int pct = atoi(dp);
-    lcd_progress_bar(4, pct, ACCENT, BG);
-    /* 行5: 进度% + 下一事件 */
-    const char *ne_txt = "SET";
-    if (ne[0] == '1') ne_txt = "RISE";
-    else if (ne[0] == '2') ne_txt = "POLAR DAY";
-    else if (ne[0] == '3') ne_txt = "POLAR NIGHT";
-    snprintf(line, sizeof line, "%s%%  %s %sm", dp, ne_txt, tne);
-    lcd_line(5, line, FG, BG);
-    /* 行6: 同步状态 */
+
+    /* 块1: 日期(日变才刷) + 时间(秒变刷), 分段绘制 */
+    if (strcmp(d, c_d)) { strcpy(c_d, d);
+        lcd_fill(2, LINE_Y(0), 6 * 12, FONT_STEP, BG);
+        lcd_text(2, LINE_Y(0), d, FG, BG);
+    }
+    if (strcmp(t, c_t)) { strcpy(c_t, t);
+        lcd_fill(2 + 6 * 12, LINE_Y(0), 9 * 12, FONT_STEP, BG);
+        lcd_text(2 + 6 * 12, LINE_Y(0), t, FG, BG);
+    }
+    /* 块2: 太阳时行(1) - 分钟变刷 */
+    if (strcmp(s, c_s)) { strcpy(c_s, s);
+        snprintf(line, sizeof line, "SOLAR %s", s);
+        lcd_line(1, line, ACCENT, BG);
+    }
+    /* 块3: 日出日落行(2) - 天变刷 */
+    if (strcmp(r, c_r) || strcmp(st, c_st)) { strcpy(c_r, r); strcpy(c_st, st);
+        snprintf(line, sizeof line, "R %s  S %s", r, st);
+        lcd_line(2, line, FG, BG);
+    }
+    /* 字节4+5共用脏标志(先算后更新, 否则块5恒false) */
+    int az_alt_dirty = strcmp(alt, c_alt) || strcmp(az, c_az);
+    if (az_alt_dirty) { strcpy(c_alt, alt); strcpy(c_az, az);
+        snprintf(line, sizeof line, "ALT %s   AZ %s", alt, az);
+        lcd_line(3, line, YEL, BG);
+        lcd_render_sun_graphics(atoi(alt), atoi(az));
+        gfx_blit(66);
+    }
+    /* 块6: 进度条+%+事件 - dp/ne/tne变刷 */
+    if (strcmp(dp, c_dp) || strcmp(ne, c_ne) || strcmp(tne, c_tne)) {
+        strcpy(c_dp, dp); strcpy(c_ne, ne); strcpy(c_tne, tne);
+        int pct = atoi(dp);
+        lcd_fill(2, 166, 16 * 14, 8, BG);
+        if (ne[0] != '1') {
+            for (int c = 0; c < 16; c++)
+                lcd_fill(2 + c * 14, 166, 10, 8, c * 100 / 16 < pct ? ORG : DIM);
+        }
+        const char *ne_txt = "SET";
+        if (ne[0] == '1') ne_txt = "RISE";
+        else if (ne[0] == '2') ne_txt = "POLAR DAY";
+        else if (ne[0] == '3') ne_txt = "POLAR NIGHT";
+        snprintf(line, sizeof line, "%s%%  %s %sm", dp, ne_txt, tne);
+        lcd_fill(0, 178, LCD_H_RES, FONT_STEP, BG);
+        lcd_text(2, 178, line, FG, BG);
+    }
+    /* 块7: 同步状态 - 显示级变刷(h/m/s取整) */
     long sv = atol(syn);
     char syncbuf[24];
     const char *sy;
     uint16_t syc = DIM;
-    if (sv == -1) { sy = "SYNCING"; syc = rgb565(255, 255, 0); }
+    if (sv == -1) { sy = "SYNCING"; syc = YEL; }
     else if (sv == -2) { sy = "NO SYNC"; syc = rgb565(255, 80, 0); }
     else {
         if (sv >= 3600) snprintf(syncbuf, sizeof syncbuf, "SYNCED %ldh AGO", sv / 3600);
         else if (sv >= 60) snprintf(syncbuf, sizeof syncbuf, "SYNCED %ldm AGO", sv / 60);
         else snprintf(syncbuf, sizeof syncbuf, "SYNCED %lds AGO", sv);
-        sy = syncbuf;
-        syc = ACCENT;
+        sy = syncbuf; syc = ACCENT;
     }
-    lcd_line(6, sy, syc, BG);
-    /* 行7: 坐标(同步状态下面一行) */
-    char locbuf[20];
-    snprintf(locbuf, sizeof locbuf, "%s %s", la, lo);
-    locbuf[18] = 0;
-    lcd_line(7, locbuf, DIM, BG);
+    if (strcmp(sy, c_syn)) { strcpy(c_syn, sy);
+        lcd_fill(0, 194, LCD_H_RES, FONT_STEP, BG);
+        lcd_text(2, 194, sy, syc, BG);
+    }
+    /* 块8: 坐标 - 几乎不变 */
+    snprintf(line, sizeof line, "%s %s", la, lo);
+    line[18] = 0;
+    if (strcmp(line, c_loc)) { strcpy(c_loc, line);
+        lcd_fill(0, 210, LCD_H_RES, FONT_STEP, BG);
+        lcd_text(2, 210, line, DIM, BG);
+    }
     xSemaphoreGive(s_lcd_mutex);
 }

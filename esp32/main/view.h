@@ -12,6 +12,9 @@ void view_init(void);
 /* 渲染心跳面板(传入心跳JSON字符串) */
 void view_render_hb(const char *hb_json);
 
+/* 20Hz判定入口(每50ms): 分块脏检查, 无变化零绘制 */
+void view_poll(void);
+
 /* 渲染搜星界面(无心跳时) */
 void view_render_search(void);
 
